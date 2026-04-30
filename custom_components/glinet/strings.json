@@ -1,7 +1,20 @@
 {
   "config": {
     "error": {
-      "auth_failed": "Unable to connect to GL.iNet router. Check credentials and host."
+      "cannot_connect": "Cannot connect to GL.iNet router. Check the host address.",
+      "invalid_auth": "Invalid authentication. Check your username and password.",
+      "unknown": "An unknown error occurred. Check the logs for details."
+    },
+    "step": {
+      "user": {
+        "title": "Connect to GL.iNet Router",
+        "description": "Enter your GL.iNet router connection details.",
+        "data": {
+          "host": "Host",
+          "username": "Username",
+          "password": "Password"
+        }
+      }
     }
   }
 }
