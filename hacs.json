@@ -1,0 +1,5 @@
+{
+  "name": "GL.iNet Router",
+  "domains": ["glinet"],
+  "content_in_root": false
+}

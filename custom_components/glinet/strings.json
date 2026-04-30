@@ -1,0 +1,7 @@
+{
+  "config": {
+    "error": {
+      "auth_failed": "Unable to connect to GL.iNet router. Check credentials and host."
+    }
+  }
+}
