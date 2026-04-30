@@ -40,11 +40,11 @@ class GlinetWifiSwitch(SwitchEntity):
         return self._iface().get("enabled", False)
 
     async def async_turn_on(self):
-        await self.api.async_set_wifi(self.name, True)
+        await self.api.wireless.set_enabled(self.name, True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self):
-        await self.api.async_set_wifi(self.name, False)
+        await self.api.wireless.set_enabled(self.name, False)
         await self.coordinator.async_request_refresh()
 
     @property
@@ -65,11 +65,11 @@ class GlinetVPNSwitch(SwitchEntity):
         return self.coordinator.data["vpn"].get("connected", False)
 
     async def async_turn_on(self):
-        await self.api.async_set_vpn(True)
+        await self.api.vpn.start()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self):
-        await self.api.async_set_vpn(False)
+        await self.api.vpn.stop()
         await self.coordinator.async_request_refresh()
 
 
@@ -86,11 +86,11 @@ class GlinetLEDControlSwitch(SwitchEntity):
         return self.coordinator.data.get("system_info", {}).get("led_enabled", True)
 
     async def async_turn_on(self):
-        await self.api.async_set_led(True)
+        await self.api.system.set_led(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self):
-        await self.api.async_set_led(False)
+        await self.api.system.set_led(False)
         await self.coordinator.async_request_refresh()
 
 
@@ -107,9 +107,9 @@ class GlinetGuestNetworkSwitch(SwitchEntity):
         return self.coordinator.data.get("wifi", {}).get("guest_enabled", False)
 
     async def async_turn_on(self):
-        await self.api.async_set_guest_network(True)
+        await self.api.wireless.set_guest_network(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self):
-        await self.api.async_set_guest_network(False)
+        await self.api.wireless.set_guest_network(False)
         await self.coordinator.async_request_refresh()

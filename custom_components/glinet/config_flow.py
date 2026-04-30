@@ -21,6 +21,9 @@ from homeassistant.helpers.device_registry import format_mac
 from .const import DOMAIN, CONF_MAC
 from .utils import adjust_mac
 
+from gli_py import GLinet
+from gli_py.error_handling import AuthenticationError, NonZeroResponse
+
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_USER = "root"
@@ -64,12 +67,9 @@ class TestingHub:
 
     async def connect(self) -> bool:
         """Test if we can communicate with the host."""
-        from .api import GlinetAPI
-
         try:
-            # Quick connection test with timeout
-            api = GlinetAPI(self.host, self.username, "dummy")
-            await asyncio.wait_for(api.async_connect(), timeout=10.0)
+            client = GLinet(self.host, self.username, "dummy")
+            await client.connect()
             return True
         except asyncio.TimeoutError:
             _LOGGER.warning("Connection to %s timed out", self.host)
@@ -80,13 +80,11 @@ class TestingHub:
 
     async def authenticate(self, password: str) -> bool:
         """Test if we can authenticate with the host."""
-        from .api import GlinetAPI
-
         try:
-            api = GlinetAPI(self.host, self.username, password)
-            await asyncio.wait_for(api.async_connect(), timeout=15.0)
+            client = GLinet(self.host, self.username, password)
+            await client.connect()
             # Test a simple API call
-            await asyncio.wait_for(api.async_get_status(), timeout=10.0)
+            status = await client.get_status()
             return True
         except asyncio.TimeoutError:
             _LOGGER.warning("Authentication to %s timed out", self.host)
@@ -107,11 +105,10 @@ async def validate_input(data: dict[str, Any], hass: HomeAssistant) -> dict[str,
         raise InvalidAuth
 
     # Get router info for unique ID
-    from .api import GlinetAPI
-    api = GlinetAPI(data[CONF_HOST], data[CONF_USERNAME], data[CONF_PASSWORD])
-    await api.async_connect()
-    status = await api.async_get_status()
-    await api.async_close()
+    client = GLinet(data[CONF_HOST], data[CONF_USERNAME], data[CONF_PASSWORD])
+    await client.connect()
+    status = await client.get_status()
+    await client.close()
 
     router_mac = status.get("mac", "")
     router_model = status.get("model", "Router")

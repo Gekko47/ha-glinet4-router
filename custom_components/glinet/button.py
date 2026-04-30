@@ -19,7 +19,7 @@ class Reboot(ButtonEntity):
         self._attr_device_info = {"identifiers": {device_identifiers}}
 
     async def async_press(self):
-        await self.api.async_reboot()
+        await self.api.system.reboot()
 
 
 class UpdateFirmware(ButtonEntity):
@@ -30,4 +30,4 @@ class UpdateFirmware(ButtonEntity):
         self._attr_device_info = {"identifiers": {device_identifiers}}
 
     async def async_press(self):
-        await self.api.async_update_firmware()
+        await self.api.system.update_firmware()

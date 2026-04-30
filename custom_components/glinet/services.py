@@ -66,7 +66,13 @@ async def async_setup_services(hass: HomeAssistant):
         }
 
         try:
-            await api.async_add_port_forwarding(rule)
+            await api.firewall.add_port_forwarding(
+                call.data.get("description", ""),
+                call.data["protocol"],
+                call.data["external_port"],
+                call.data["internal_ip"],
+                call.data["internal_port"]
+            )
             # Refresh coordinator data
             coordinator = hass.data[DOMAIN][host]["coordinator"]
             await coordinator.async_request_refresh()
@@ -83,7 +89,7 @@ async def async_setup_services(hass: HomeAssistant):
         rule_id = call.data["rule_id"]
 
         try:
-            await api.async_delete_port_forwarding(rule_id)
+            await api.firewall.delete_port_forwarding(rule_id)
             # Refresh coordinator data
             coordinator = hass.data[DOMAIN][host]["coordinator"]
             await coordinator.async_request_refresh()
@@ -103,7 +109,7 @@ async def async_setup_services(hass: HomeAssistant):
         ]
 
         try:
-            await api.async_set_dns_servers(servers)
+            await api.network.set_dns(servers)
             # Refresh coordinator data
             coordinator = hass.data[DOMAIN][host]["coordinator"]
             await coordinator.async_request_refresh()

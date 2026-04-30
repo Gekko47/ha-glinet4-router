@@ -18,73 +18,73 @@ class GlinetCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         data = {}
         try:
-            data["status"] = await self.api.async_get_status()
+            data["status"] = await self.api.system.status()
         except Exception:
             data["status"] = {}
 
         try:
-            data["clients"] = await self.api.async_get_clients()
+            data["clients"] = await self.api.clients.list()
         except Exception:
             data["clients"] = []
 
         try:
-            data["throughput"] = await self.api.async_get_throughput()
+            data["throughput"] = await self.api.system.realtime()
         except Exception:
             data["throughput"] = {}
 
         try:
-            data["vpn"] = await self.api.async_get_vpn_status()
+            data["vpn"] = await self.api.vpn.status()
         except Exception:
             data["vpn"] = {}
 
         try:
-            data["wifi"] = await self.api.async_get_wifi()
+            data["wifi"] = await self.api.wireless.status()
         except Exception:
             data["wifi"] = {"interfaces": []}
 
         # NEW: Additional data sources
         try:
-            data["system_info"] = await self.api.async_get_system_info()
+            data["system_info"] = await self.api.system.info()
         except Exception:
             data["system_info"] = {}
 
         try:
-            data["dhcp_leases"] = await self.api.async_get_dhcp_leases()
+            data["dhcp_leases"] = await self.api.dhcp.leases()
         except Exception:
             data["dhcp_leases"] = []
 
         try:
-            data["port_forwarding"] = await self.api.async_get_port_forwarding()
+            data["port_forwarding"] = await self.api.firewall.port_forwarding()
         except Exception:
             data["port_forwarding"] = []
 
         try:
-            data["wan_status"] = await self.api.async_get_wan_status()
+            data["wan_status"] = await self.api.network.wan()
         except Exception:
             data["wan_status"] = {}
 
         try:
-            data["lan_status"] = await self.api.async_get_lan_status()
+            data["lan_status"] = await self.api.network.lan()
         except Exception:
             data["lan_status"] = {}
 
         try:
-            data["dns_settings"] = await self.api.async_get_dns_settings()
+            data["dns_settings"] = await self.api.network.dns()
         except Exception:
             data["dns_settings"] = {}
 
         try:
-            data["usb_devices"] = await self.api.async_get_usb_devices()
+            data["usb_devices"] = await self.api.system.usb()
         except Exception:
             data["usb_devices"] = []
 
         try:
-            data["logs"] = await self.api.async_get_logs()
+            data["logs"] = await self.api.system.logs()
         except Exception:
             data["logs"] = []
 
         try:
-            data["firmware"] = await self.api.async_get_firmware_status()
+            data["firmware"] = await self.api.system.firmware()
         except Exception:
             data["firmware"] = {}
 

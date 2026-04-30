@@ -1,4 +1,4 @@
-from gli4py import GLiNetClient
+from gli4py import GLinet
 
 
 class GlinetAPI:
