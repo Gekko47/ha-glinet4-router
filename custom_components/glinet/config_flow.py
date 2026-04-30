@@ -1,10 +1,8 @@
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST
-from homeassistant.core import callback
 
 from .const import DOMAIN, CONF_USERNAME, CONF_PASSWORD
-from .api import GlinetAPI
 
 
 DEFAULT_USER = "root"
@@ -59,6 +57,8 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ---------------------------------------------------
     async def async_step_validate(self, user_input=None):
         errors = {}
+
+        from .api import GlinetAPI
 
         api = GlinetAPI(self.host, self.username, self.password)
 
