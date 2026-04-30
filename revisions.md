@@ -29,9 +29,9 @@ The integration now fully implements all features listed in the README:
 The code is now more robust, follows Home Assistant conventions, and provides a better user experience with proper device organization and reliable entity management.
 
 🔄 Recent Updates (Leveraging gli4py Directly)
-- **Dependency Update**: Changed manifest.json to use "gli-py" (PyPI package) instead of git dependency for better reliability.
-- **Direct gli4py Usage**: Removed the GlinetAPI wrapper class and updated all code to use GLinet from gli_py directly, following the reference integration's approach.
-- **Import Changes**: Updated imports from gli4py to gli_py in config_flow.py and __init__.py.
-- **API Calls**: Modified coordinator, switches, buttons, and services to call GLinet methods directly (e.g., api.system.status(), api.vpn.start(), api.firewall.add_port_forwarding()).
-- **Config Flow**: Updated validation and connection testing to use GLinet directly without the wrapper.
-- **Code Simplification**: Eliminated intermediate abstraction layer, making the integration more aligned with gli4py's native API and the reference implementation.
+- **Dependency Update**: Updated manifest.json to include gli4py as a requirement from git repository for proper dependency management.
+- **Direct gli4py Usage**: Updated config_flow.py to use GLinet from gli4py directly, implementing TestingHub class for connection testing and validation.
+- **Import Changes**: Added imports from gli4py and uplink in config_flow.py for proper API integration.
+- **Config Flow Improvements**: Replaced custom connection logic with gli4py-based TestingHub that handles reachability, authentication, and router info retrieval.
+- **Error Handling**: Improved error handling with specific exceptions from gli4py (NonZeroResponse) for better user feedback.
+- **Code Simplification**: Streamlined config flow to follow the reference integration's patterns for reliable setup.
