@@ -13,7 +13,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_registry import format_mac
 from homeassistant.components.zeroconf import ZeroconfServiceInfo
 
 
@@ -38,6 +37,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ),
     }
 )
+
 
 
 class CannotConnect(HomeAssistantError):
@@ -106,19 +106,32 @@ async def validate_input(data: dict[str, Any], hass: HomeAssistant) -> dict[str,
     }
 
 
-async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo):
-    host = discovery_info.host
-
-    return await self.async_step_user(
-        {
-            "host": host
-        }
-    )
-
 class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle GL.iNet config flow."""
 
     VERSION = 1
+
+    async def async_step_zeroconf(self, discovery_info):
+        """Handle Zeroconf discovery."""
+
+        hostname = (discovery_info.hostname or "").lower()
+
+        # Filter: only likely GL.iNet devices
+        if "gl" not in hostname:
+            return self.async_abort(reason="not_glinet")
+
+        return await self.async_step_user(
+            {
+                CONF_HOST: discovery_info.host,
+            }
+        )
+        
+    
+    def _normalize_mac(mac: str) -> str:
+        """Normalize MAC address for unique_id usage."""
+        if not mac:
+            return ""
+        return mac.lower().replace(":", "").replace("-", "")
 
     async def async_step_user(self, user_input=None):
         errors = {}
@@ -136,7 +149,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
 
             else:
-                unique_id = format_mac(info[CONF_MAC]) if info[CONF_MAC] else user_input[CONF_HOST]
+                unique_id = _normalize_mac(info.get(CONF_MAC)) or user_input[CONF_HOST]
 
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
