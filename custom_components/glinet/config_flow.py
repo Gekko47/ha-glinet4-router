@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+import aiohttp
 from typing import Any
 
 import voluptuous as vol
@@ -62,28 +64,34 @@ class TestingHub:
         self.mac = ""
         self.model = ""
 
-    async def connect(self) -> bool:
-        try:
-            return await self.router.router_reachable(self.username)
-        except Exception as e:
-            _LOGGER.warning("Connect failed: %s", e)
-            return False
-
-    async def authenticate(self, password: str) -> bool:
+    async def validate(self, password: str) -> bool:
         try:
             await self.router.login(self.username, password)
+
             info = await self.router.router_info()
+            if not isinstance(info, dict):
+                info = {}
 
             self.mac = info.get("mac", "")
             self.model = info.get("model", "GL.iNet")
 
             return True
 
-        except NonZeroResponse:
+        except NonZeroResponse as e:
+            _LOGGER.debug("Auth rejected by device: %s", e)
             return False
+
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            _LOGGER.debug("Router timeout: %s", e)
+            raise CannotConnect from e
+
+        except OSError as e:
+            _LOGGER.debug("Network error: %s", e)
+            raise CannotConnect from e
+
         except Exception as e:
-            _LOGGER.warning("Auth error: %s", e)
-            return False
+            _LOGGER.exception("Unexpected router error during GL.iNet validation")
+            raise CannotConnect from e
 
 
 async def validate_input(data: dict[str, Any], hass: HomeAssistant) -> dict[str, Any]:
@@ -93,15 +101,18 @@ async def validate_input(data: dict[str, Any], hass: HomeAssistant) -> dict[str,
         hass=hass,
     )
 
-    if not await hub.connect():
-        raise CannotConnect
+    try:
+        ok = await hub.validate(data[CONF_PASSWORD])
+    except CannotConnect:
+        raise
 
-    if not await hub.authenticate(data[CONF_PASSWORD]):
+    if not ok:
         raise InvalidAuth
 
     return {
         "title": f"GL.iNet ({hub.model})",
         CONF_MAC: hub.mac,
+        "model": hub.model,
         "data": data,
     }
 
@@ -111,29 +122,30 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_zeroconf(self, discovery_info):
+    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo):
         """Handle Zeroconf discovery."""
 
         hostname = (discovery_info.hostname or "").lower()
 
-        # Filter: only likely GL.iNet devices
-        if "gl" not in hostname:
+        if not hostname.startswith("gl"):
             return self.async_abort(reason="not_glinet")
+
+        host = discovery_info.host or discovery_info.ip_address
 
         return await self.async_step_user(
             {
-                CONF_HOST: discovery_info.host,
+                CONF_HOST: host,
             }
         )
         
     
-    def _normalize_mac(mac: str) -> str:
-        """Normalize MAC address for unique_id usage."""
+    @staticmethod
+    def _normalize_mac(mac: str | None) -> str:
         if not mac:
             return ""
         return mac.lower().replace(":", "").replace("-", "")
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors = {}
 
         if user_input is not None:
@@ -145,11 +157,12 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             except Exception as e:
-                _LOGGER.exception("Unexpected error: %s", e)
+                _LOGGER.exception("Unexpected error during GL.iNet configuration: %s", e)
                 errors["base"] = "unknown"
 
             else:
-                unique_id = _normalize_mac(info.get(CONF_MAC)) or user_input[CONF_HOST]
+                mac = self._normalize_mac(info.get(CONF_MAC))
+                unique_id = mac or info.get("model", "") or user_input[CONF_HOST].lower()
 
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
