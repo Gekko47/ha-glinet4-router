@@ -1,10 +1,14 @@
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-from .const import DOMAIN
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from .const import DOMAIN, API_PATH
 from .services import async_setup_services, async_unload_services
 
-PLATFORMS = ["sensor", "binary_sensor", "device_tracker", "switch", "button", "select", "number", "text"]
+from gli4py import GLinet
+from uplink import AiohttpClient
+
+PLATFORMS = ["sensor", "binary_sensor", "device_tracker", "switch", "button"]
 
 
 async def async_setup(hass: HomeAssistant):
@@ -20,16 +24,15 @@ async def async_unload(hass: HomeAssistant):
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    from gli4py import GLinet
     from .coordinator import GlinetCoordinator
 
     api = GLinet(
-        entry.data["host"],
-        entry.data["username"],
-        entry.data["password"],
+        base_url=entry.data["host"] + API_PATH,
+        client=AiohttpClient(session=async_get_clientsession(hass)),
+        sync=False,
     )
 
-    await api.connect()
+    await api.login(entry.data["username"], entry.data["password"])
 
     coordinator = GlinetCoordinator(hass, api)
     await coordinator.async_config_entry_first_refresh()
@@ -42,7 +45,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         manufacturer="GL.iNet",
         model="Router",
         name=f"GL.iNet Router ({entry.data['host']})",
-        sw_version=coordinator.data.get("status", {}).get("firmware_version"),
+        sw_version=coordinator.data.get("system_info", {}).get("firmware_version"),
     )
 
     device_identifiers = (DOMAIN, entry.data["host"])
