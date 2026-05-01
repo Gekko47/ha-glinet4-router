@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.components.zeroconf import ZeroconfServiceInfo
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 
 from gli4py import GLinet
@@ -122,7 +122,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo):
+    async def async_step_zeroconf(self, discovery_info):
         """Handle Zeroconf discovery."""
 
         hostname = (discovery_info.hostname or "").lower()
@@ -130,7 +130,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not hostname.startswith("gl"):
             return self.async_abort(reason="not_glinet")
 
-        host = discovery_info.host or discovery_info.ip_address
+        host = discovery_info.host
 
         return await self.async_step_user(
             {
