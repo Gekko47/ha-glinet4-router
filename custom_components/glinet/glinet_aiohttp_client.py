@@ -138,8 +138,17 @@ class GLinetClient:
                             msg = str(err.get("message", "")).lower()
 
                             # real auth failure → stop
-                            if code in (-32000, -32001) or "access" in msg:
-                                raise GlinetAuthError(err)
+                            if isinstance(err, dict):
+                                code = err.get("code")
+                                msg = str(err.get("message", "")).lower()
+
+                                # Only treat as FINAL auth failure if we're on LAST attempt
+                                if code in (-32001,) or ("access denied" in msg and i == len(attempts) - 1):
+                                    raise GlinetAuthError(err)
+
+                            # otherwise → try next strategy
+                            last_error = err
+                            continue
 
                         last_error = err
                         continue
