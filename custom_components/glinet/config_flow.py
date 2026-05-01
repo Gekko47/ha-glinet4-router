@@ -14,6 +14,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.components.zeroconf import ZeroconfServiceInfo
+
 
 from gli4py import GLinet
 from gli4py.error_handling import NonZeroResponse
@@ -27,10 +29,10 @@ CONF_MAC = "mac"
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): selector.TextSelector(),
         vol.Required(CONF_HOST, default=DEFAULT_HOST): selector.TextSelector(
             selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
         ),
+        vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): selector.TextSelector(),
         vol.Required(CONF_PASSWORD, default=DEFAULT_PASSWORD): selector.TextSelector(
             selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
         ),
@@ -103,6 +105,15 @@ async def validate_input(data: dict[str, Any], hass: HomeAssistant) -> dict[str,
         "data": data,
     }
 
+
+async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo):
+    host = discovery_info.host
+
+    return await self.async_step_user(
+        {
+            "host": host
+        }
+    )
 
 class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle GL.iNet config flow."""

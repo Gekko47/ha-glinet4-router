@@ -11,7 +11,7 @@ from uplink import AiohttpClient
 PLATFORMS = ["sensor", "binary_sensor", "device_tracker", "switch", "button"]
 
 
-async def async_setup(hass: HomeAssistant):
+async def async_setup(hass: HomeAssistant, config):
     """Set up the GL.iNet router integration."""
     await async_setup_services(hass)
     return True
