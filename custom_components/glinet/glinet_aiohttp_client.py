@@ -95,6 +95,7 @@ class GLinetClient:
                 raise GlinetConnectionError(f"Router unreachable: {e}") from e
 
             attempts = [
+                # ---- v4 auth ----
                 ("v4-auth-null", lambda: self._build_payload(
                     "call",
                     [None, "auth", "login", {"username": username, "password": password}],
@@ -107,6 +108,18 @@ class GLinetClient:
                     "call",
                     [None, "auth", "login", [username, password]],
                 )),
+
+                # ---- 🔥 ADD THESE ----
+                ("session-object", lambda: self._build_payload(
+                    "call",
+                    [None, "session", "login", {"username": username, "password": password}],
+                )),
+                ("session-list", lambda: self._build_payload(
+                    "call",
+                    [None, "session", "login", [username, password]],
+                )),
+
+                # ---- legacy ----
                 ("legacy", lambda: self._build_payload(
                     "login",
                     {"username": username, "password": password},
