@@ -1,8 +1,8 @@
 # GL.iNet Router Integration for Home Assistant
 
-A custom Home Assistant integration for monitoring and controlling **GL.iNet routers** using the `gli4py` API.
+A modern Home Assistant integration for monitoring and controlling **GL.iNet routers** using a hardened async API client and coordinator-based architecture.
 
-This integration provides real-time visibility into your router, connected devices, and network activity, along with control over key features like WiFi and VPN.
+Designed for **Home Assistant 2026.4+** with HACS compatibility in mind.
 
 ---
 
@@ -10,165 +10,125 @@ This integration provides real-time visibility into your router, connected devic
 
 ### 📡 Router Monitoring
 
-* Router uptime
-* WAN download/upload throughput
-* CPU temperature
-* Memory usage
-* Disk usage
-* Flash usage
-* System load (1min, 5min, 15min averages)
-* WAN/LAN IP addresses
-* Connected device count
-* DHCP lease count
-* Port forwarding rule count
-* USB device status
-* Firmware version
-* System logs
+Real-time system and network metrics:
+
+- Router uptime
+- WAN download/upload throughput
+- CPU temperature
+- Memory usage
+- Disk usage
+- Flash usage
+- System load (1m / 5m / 15m averages)
+- WAN and LAN IP addresses
+- Connected device count
+- DHCP lease count
+- Port forwarding rules
+- USB device detection
+- Firmware version
+- System logs (basic support)
+
+---
 
 ### 👥 Connected Devices
 
-* Automatic discovery of connected clients
-* Device tracker entities for each client
-* Rich attributes per device:
+Automatically discovered client devices:
 
-  * IP address
-  * MAC address
-  * Hostname
-  * Signal strength (WiFi)
-  * RX/TX usage
-  * Interface details
+- MAC-based device tracking
+- Device registry integration
+- Per-device attributes:
+  - IP address
+  - Hostname
+  - Interface (WiFi/Ethernet)
+  - Signal strength (if available)
+  - RX/TX usage (if provided by router)
 
-### 📊 Per-Device Bandwidth
+---
 
-* Individual sensors per client:
+### 📶 WiFi Control
 
-  * Download (RX)
-  * Upload (TX)
+- One switch per WiFi interface
+- Enable / disable WiFi radios
+- Attributes:
+  - SSID
+  - Band (2.4GHz / 5GHz)
+  - Channel
+  - Hidden SSID flag
+  - Guest network flag
+  - Connected client count
 
-### 🔒 VPN Status & Control
+---
 
-* VPN connection status (binary sensor)
-* Enable/disable VPN via switch
+### 🔒 VPN Control
 
-### 📶 WiFi Interface Control
+- VPN connection status sensor
+- VPN enable/disable switch
+- Attributes:
+  - Connection type
+  - Server
+  - Status
+  - Uptime
 
-* One switch per WiFi interface (e.g. 2.4GHz / 5GHz)
-* Guest network enable/disable
-* Attributes include:
-
-  * SSID
-  * Channel
-  * Band
-  * Encryption
-  * Connected clients
+---
 
 ### 🔘 Router Controls
 
-* Reboot button
-* LED control switch
-* Firmware update button
-
-### 🌐 Network Configuration
-
-* DNS server selection (primary/secondary)
-* DHCP lease time configuration
-* Port forwarding management
-* Firewall rule monitoring
+- Reboot router button
+- Service-based control layer (safe entry_id targeting)
 
 ---
 
-## 🔧 Services
+## 🧠 Architecture
 
-The integration provides several services for advanced router configuration:
+This integration uses a **dual-coordinator model**:
 
-### `glinet.add_port_forwarding`
+### ⚡ Fast Coordinator
+Handles frequent updates:
+- Clients
+- WiFi state
+- VPN status
+- Throughput
+- WAN status
 
-Add a port forwarding rule.
+### 🐢 Slow Coordinator
+Handles heavy or rarely changing data:
+- System info
+- Firmware version
+- Device metadata
+- Static network configuration
 
-**Parameters:**
-- `host` (string, required): Router IP address
-- `external_port` (integer, required): External port number
-- `internal_ip` (string, required): Internal IP address
-- `internal_port` (integer, required): Internal port number
-- `protocol` (string, optional): Protocol ("tcp", "udp", "both") - default: "tcp"
-- `description` (string, optional): Rule description
-
-### `glinet.remove_port_forwarding`
-
-Remove a port forwarding rule.
-
-**Parameters:**
-- `host` (string, required): Router IP address
-- `rule_id` (string, required): Rule identifier
-
-### `glinet.set_dns_servers`
-
-Set DNS servers.
-
-**Parameters:**
-- `host` (string, required): Router IP address
-- `primary` (string, required): Primary DNS server IP
-- `secondary` (string, required): Secondary DNS server IP
-
-### `glinet.add_static_lease`
-
-Add a static DHCP lease.
-
-**Parameters:**
-- `host` (string, required): Router IP address
-- `mac` (string, required): MAC address
-- `ip` (string, required): IP address to assign
-- `hostname` (string, required): Hostname
-
-### `glinet.remove_static_lease`
-
-Remove a static DHCP lease.
-
-**Parameters:**
-- `host` (string, required): Router IP address
-- `mac` (string, required): MAC address
-
-### `glinet.set_dhcp_config`
-
-Set DHCP configuration.
-
-**Parameters:**
-- `host` (string, required): Router IP address
-- `lease_time` (integer, optional): Lease time in hours
-- `start_ip` (string, optional): DHCP range start IP
-- `end_ip` (string, optional): DHCP range end IP
-- `gateway` (string, optional): Gateway IP
-- `subnet_mask` (string, optional): Subnet mask
-
-### 🔄 Dynamic Updates
-
-* Devices automatically appear/disappear
-* Entity state updates via a central coordinator
-* All router-related entities are grouped under a single GL.iNet Router device
-
-### 🔍 Auto Discovery
-
-* Zeroconf-based discovery of GL.iNet routers on your network
-* Manual setup also supported
-
-### 🧾 Diagnostics
-
-* Built-in diagnostics dump for troubleshooting
-* Sensitive data automatically redacted
+This separation improves:
+- Performance
+- API load reduction
+- State stability in HA
 
 ---
 
-## 📦 Installation
+## 🔄 Dynamic Updates
 
-### HACS (Recommended)
+- Entities update automatically via coordinators
+- Client devices appear/disappear dynamically
+- No polling per entity (fully centralized polling model)
 
-1. Open HACS in Home Assistant
-2. Go to **Integrations**
-3. Click **⋮ → Custom repositories**
-4. Add this repository URL
-5. Select **Integration**
-6. Install "GL.iNet Router"
-7. Restart Home Assistant
+---
+
+## 🧩 Device Registry
+
+The integration creates:
+
+### Router Device
+- Single GL.iNet router entry in Home Assistant
+
+### Client Devices
+- Each MAC address becomes a Home Assistant device
+- No entities required per client (lightweight registry model)
+
+---
+
+## 🔍 Discovery
+
+### Supported discovery methods:
+- Zeroconf (`_glinet._tcp.local`)
+- Manual configuration
 
 ---
 
@@ -176,87 +136,105 @@ Set DHCP configuration.
 
 ### Automatic Discovery
 
-If your router is discoverable via Zeroconf:
-
 1. Go to **Settings → Devices & Services**
-2. You should see "GL.iNet Router" discovered
+2. Look for **GL.iNet Router**
 3. Click **Configure**
 
 ---
 
 ### Manual Setup
 
-If not discovered:
-
 1. Go to **Settings → Devices & Services**
-2. Click **+ Add Integration**
+2. Click **Add Integration**
 3. Search for **GL.iNet Router**
 4. Enter:
+   - Host (e.g. `192.168.8.1`)
+   - Username (default: `root`)
+   - Password
 
-   * **Host** (default: `192.168.8.1`)
-   * **Username** (default: `root`)
-   * **Password** (default: `goodlife`)
+---
+
+## 🔧 Services
+
+### `glinet.reboot_router`
+
+Reboot a router instance.
+
+**Parameters:**
+- `entry_id` (required): Config entry ID
 
 ---
 
 ## 🔐 Security
 
-* Credentials are stored securely using Home Assistant’s config entry system
-* No passwords are written to disk in plain text
-* Diagnostics automatically redact sensitive information
+- Credentials stored securely in Home Assistant config entries
+- No plaintext credential storage
+- API token handling is session-based and automatically refreshed
+- Sensitive attributes redacted in diagnostics
 
 ---
 
-## 🧠 How It Works
+## 🧪 Requirements
 
-* Uses `gli4py` to communicate with the router API
-* A central **DataUpdateCoordinator** polls the router
-* Entities subscribe to coordinator data
-* Device tracking is dynamic based on MAC addresses
-
----
-
-## ⚠️ Requirements
-
-* GL.iNet router running compatible firmware (v4+ recommended)
-* Local network access to the router
-* Home Assistant 2024.6+
-* `gli4py` library with extended API support for:
-  - System monitoring (CPU, memory, flash, load)
-  - DHCP management
-  - Port forwarding
-  - DNS configuration
-  - USB device detection
+- GL.iNet router with compatible firmware (GL.iNet OS 4+ recommended)
+- Local network access to router
+- Home Assistant **2026.4+**
+- Python aiohttp session (provided by HA)
 
 ---
 
 ## 🐛 Known Limitations
 
-* Zeroconf discovery depends on router advertising services
-* Some API fields may vary between firmware versions
-* VLAN / segmented networks may prevent discovery
+- Zeroconf discovery may not work on VLAN-isolated networks
+- API fields vary between firmware versions
+- Some routers may not expose:
+  - USB devices
+  - DHCP leases
+  - Port forwarding rules
+- VPN state detection depends on firmware response format
 
 ---
 
-## 🛠 Troubleshooting
+## 🧰 Troubleshooting
 
-* Ensure router API is accessible from Home Assistant
-* Verify credentials (default: root / goodlife)
-* Check logs:
+### Router not connecting
+- Verify host is reachable from HA
+- Check username/password (default often `root`)
+- Ensure router API is enabled
 
-  ```
-  Settings → System → Logs
-  ```
+### Missing sensors
+- Firmware may not expose all endpoints
+- Check HA logs for API failures
 
-* Service calls may fail if `gli4py` library doesn't support all API endpoints
-* Some advanced features require specific GL.iNet firmware versions
-* Port forwarding and DHCP services require proper permissions on the router
+### Discovery not working
+- Ensure multicast/zeroconf is not blocked
+- Try manual configuration
+
+Logs:
+Settings → System → Logs → GL.iNet Router
+---
+
+## 🧠 Design Philosophy
+
+This integration prioritizes:
+
+- Stability over feature explosion
+- Centralized state management (coordinators)
+- Minimal entity overhead
+- Safe API retry logic
+- HA-native patterns only
 
 ---
 
 ## 🤝 Contributing
 
-Pull requests and issues welcome.
+Pull requests welcome.
+
+Please ensure:
+- HA 2026.4 compatibility
+- No entity-side polling
+- All API access goes through coordinator layer
+- HACS lint compliance
 
 ---
 
