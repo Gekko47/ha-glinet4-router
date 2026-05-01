@@ -1,8 +1,9 @@
 DOMAIN = "glinet"
+API_PATH = "/rpc"
 
-CONF_HOST = "host"
-CONF_USERNAME = "username"
-CONF_PASSWORD = "password"
+DEFAULT_HOST = "http://192.168.8.1"
+DEFAULT_USERNAME = "root"
+DEFAULT_PASSWORD = "goodlife"
 
 SCAN_INTERVAL = 30
 

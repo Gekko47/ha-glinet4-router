@@ -20,7 +20,7 @@ async def async_unload(hass: HomeAssistant):
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    from gli_py import GLinet
+    from gli4py import GLinet
     from .coordinator import GlinetCoordinator
 
     api = GLinet(
@@ -52,7 +52,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         "api": api,
         "coordinator": coordinator,
         "device_identifiers": device_identifiers,
+        "host": entry.data["host"],
     }
+    hass.data[DOMAIN][entry.data["host"]] = hass.data[DOMAIN][entry.entry_id]
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -61,6 +63,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     data = hass.data[DOMAIN].pop(entry.entry_id)
+    hass.data[DOMAIN].pop(data["host"], None)
 
     await data["api"].close()
 

@@ -1,14 +1,18 @@
 from datetime import timedelta
+import logging
+
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .const import SCAN_INTERVAL, SIGNAL_CLIENTS_UPDATED
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class GlinetCoordinator(DataUpdateCoordinator):
     def __init__(self, hass, api):
         super().__init__(
             hass,
-            logger=None,
+            _LOGGER,
             name="glinet",
             update_interval=timedelta(seconds=SCAN_INTERVAL),
         )

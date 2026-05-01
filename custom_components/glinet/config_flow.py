@@ -13,21 +13,25 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import format_mac
 
 from gli4py import GLinet
 from gli4py.error_handling import NonZeroResponse
 from uplink import AiohttpClient
 
-from .const import DOMAIN, API_PATH, CONF_MAC
+from .const import DOMAIN, API_PATH, DEFAULT_HOST, DEFAULT_USERNAME, DEFAULT_PASSWORD
 
 _LOGGER = logging.getLogger(__name__)
 
+CONF_MAC = "mac"
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_USERNAME, default="root"): selector.TextSelector(),
-        vol.Required(CONF_HOST, default="http://192.168.8.1"): selector.TextSelector(),
-        vol.Required(CONF_PASSWORD, default="goodlife"): selector.TextSelector(
+        vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): selector.TextSelector(),
+        vol.Required(CONF_HOST, default=DEFAULT_HOST): selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+        ),
+        vol.Required(CONF_PASSWORD, default=DEFAULT_PASSWORD): selector.TextSelector(
             selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
         ),
     }
@@ -121,7 +125,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
 
             else:
-                unique_id = info[CONF_MAC] or user_input[CONF_HOST]
+                unique_id = format_mac(info[CONF_MAC]) if info[CONF_MAC] else user_input[CONF_HOST]
 
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
