@@ -11,8 +11,8 @@ from .const import DOMAIN, API_PATH
 from .services import async_setup_services
 from .glinet_aiohttp_client import GLinetClient
 
-from .coordinator.fast_coordinator import GlinetFastCoordinator
-from .coordinator.slow_coordinator import GlinetSlowCoordinator
+from .fast_coordinator import GlinetFastCoordinator
+from .slow_coordinator import GlinetSlowCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
