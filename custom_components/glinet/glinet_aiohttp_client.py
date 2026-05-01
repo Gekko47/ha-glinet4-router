@@ -9,40 +9,27 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # =========================================================
-# EXCEPTIONS (CLEAN FAILURE MODEL)
+# EXCEPTIONS
 # =========================================================
 class GlinetAuthError(Exception):
-    """Authentication failure."""
+    pass
 
 
 class GlinetConnectionError(Exception):
-    """Network / connectivity issue."""
+    pass
 
 
 class GlinetApiError(Exception):
-    """Unexpected API response."""
+    pass
 
 
 # =========================================================
 # CLIENT
 # =========================================================
 class GLinetClient:
-    """
-    HA-safe GL.iNet API client.
+    """Production-grade GL.iNet RPC client (no REST fallback)."""
 
-    Design goals:
-    - stable HA integration behavior
-    - explicit error types (no ClientError abuse)
-    - retry bounded + safe
-    - consistent async_* API surface
-    """
-
-    def __init__(
-        self,
-        session,
-        base_url: str,
-        timeout: int = 10,
-    ):
+    def __init__(self, session, base_url: str, timeout: int = 10):
         self._session = session
         self._base_url = base_url.rstrip("/")
 
@@ -51,115 +38,122 @@ class GLinetClient:
         self._password: Optional[str] = None
 
         self._timeout = ClientTimeout(total=timeout)
+        self._rpc_id = 0
 
     # =====================================================
     # AUTH
     # =====================================================
-    async def login(self, username: str, password: str) -> Any:
+    async def login(self, username: str, password: str) -> None:
         self._username = username
         self._password = password
 
-        data = await self._raw_post(
-            "/login",
-            json={"username": username, "password": password},
+        payload = self._build_payload(
+            method="login",
+            params={
+                "username": username,
+                "password": password,
+            },
         )
+
+        data = await self._raw_post("/rpc", json=payload)
+
+        _LOGGER.debug("RPC login response: %s", data)
 
         if not isinstance(data, dict):
             raise GlinetApiError("Invalid login response")
 
-        token = (
-            data.get("token")
-            or data.get("session")
-            or data.get("auth_token")
-        )
+        result = data.get("result") or {}
+
+        token = result.get("sid") or result.get("token")
 
         if not token:
-            raise GlinetAuthError("Authentication failed")
+            raise GlinetAuthError(f"Authentication failed: {data}")
 
         self._token = token
-        return data
 
     async def ensure_logged_in(self):
         if self._token:
             return
 
         if not self._username or not self._password:
-            raise GlinetAuthError("Missing stored credentials")
+            raise GlinetAuthError("Missing credentials")
 
         await self.login(self._username, self._password)
 
     # =====================================================
-    # CORE REQUEST
+    # PAYLOAD BUILDER
     # =====================================================
-    async def _request(
+    def _build_payload(self, method: str, params: Any) -> dict:
+        self._rpc_id += 1
+
+        return {
+            "jsonrpc": "2.0",
+            "id": self._rpc_id,
+            "method": method,
+            "params": params,
+        }
+
+    # =====================================================
+    # RPC CORE
+    # =====================================================
+    async def _rpc(
         self,
+        namespace: str,
         method: str,
-        path: str,
+        params: dict | None = None,
         *,
         retry: bool = True,
         retry_count: int = 0,
-        **kwargs,
     ) -> Any:
 
         await self.ensure_logged_in()
 
-        url = f"{self._base_url}{path}"
-
-        headers = kwargs.pop("headers", {})
-        headers["Content-Type"] = "application/json"
-
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
+        payload = self._build_payload(
+            method="call",
+            params=[
+                self._token,
+                namespace,
+                method,
+                params or {},
+            ],
+        )
 
         try:
-            async with self._session.request(
-                method,
-                url,
-                headers=headers,
-                timeout=self._timeout,
-                **kwargs,
-            ) as resp:
+            data = await self._raw_post("/rpc", json=payload)
 
-                # AUTH FAILURE
-                if resp.status in (401, 403):
-                    raise GlinetAuthError("Auth expired or invalid")
+            _LOGGER.debug("RPC %s.%s -> %s", namespace, method, data)
 
-                resp.raise_for_status()
+            if not isinstance(data, dict):
+                raise GlinetApiError("Invalid RPC response")
 
-                # SAFE JSON PARSE
-                ctype = resp.headers.get("Content-Type", "")
+            if data.get("error"):
+                raise GlinetApiError(data["error"])
 
-                if "application/json" in ctype:
-                    try:
-                        return await resp.json()
-                    except Exception:
-                        raise GlinetApiError("Invalid JSON response")
+            result = data.get("result")
 
-                return await resp.text()
+            if result is None:
+                raise GlinetApiError(f"Missing result in response: {data}")
+
+            return result
 
         except GlinetAuthError:
-            # force re-login once
             if retry and retry_count == 0:
-                _LOGGER.debug("Re-authenticating after auth failure")
+                _LOGGER.debug("Re-authenticating RPC session")
                 self._token = None
                 await self.ensure_logged_in()
 
-                return await self._request(
+                return await self._rpc(
+                    namespace,
                     method,
-                    path,
+                    params,
                     retry=True,
                     retry_count=1,
-                    **kwargs,
                 )
-
             raise
 
-        except ClientConnectorError as e:
-            raise GlinetConnectionError(str(e)) from e
-
-        except (ClientResponseError, ClientError) as e:
-            raise GlinetConnectionError(str(e)) from e
-
+    # =====================================================
+    # RAW HTTP
+    # =====================================================
     async def _raw_post(self, path: str, **kwargs) -> Any:
         url = f"{self._base_url}{path}"
 
@@ -169,76 +163,88 @@ class GLinetClient:
                 timeout=self._timeout,
                 **kwargs,
             ) as resp:
+
+                if resp.status in (401, 403):
+                    raise GlinetAuthError("Auth failed")
+
                 resp.raise_for_status()
 
                 try:
                     return await resp.json()
                 except Exception:
-                    return await resp.text()
+                    raise GlinetApiError("Invalid JSON response")
 
         except ClientConnectorError as e:
             raise GlinetConnectionError(str(e)) from e
 
-        except ClientError as e:
+        except (ClientResponseError, ClientError) as e:
             raise GlinetConnectionError(str(e)) from e
 
     # =====================================================
-    # PUBLIC HTTP METHODS
+    # NORMALIZED API (FOR COORDINATORS)
     # =====================================================
-    async def get(self, path: str) -> Any:
-        return await self._request("GET", path)
+    async def async_get_system_info(self) -> dict:
+        return await self._rpc("system", "info") or {}
 
-    async def post(self, path: str, json: dict | None = None) -> Any:
-        return await self._request("POST", path, json=json)
+    async def async_get_status(self) -> dict:
+        return await self._rpc("system", "status") or {}
 
-    # =====================================================
-    # NORMALIZED API (USED BY COORDINATOR)
-    # =====================================================
-    async def async_get_status(self) -> Any:
-        return await self.get("/status")
+    async def async_get_clients(self) -> dict:
+        return await self._rpc("client", "list") or {}
 
-    async def async_get_system_info(self) -> Any:
-        return await self.get("/system/info")
+    async def async_get_wifi(self) -> dict:
+        return await self._rpc("wifi", "status") or {}
 
-    async def async_get_clients(self) -> Any:
-        return await self.get("/clients")
+    async def async_get_vpn(self) -> dict:
+        return await self._rpc("vpn", "status") or {}
 
-    async def async_get_throughput(self) -> Any:
-        return await self.get("/system/realtime")
+    async def async_get_wan_status(self) -> dict:
+        return await self._rpc("network", "wan_status") or {}
 
-    async def async_get_wifi(self) -> Any:
-        return await self.get("/wifi/status")
+    async def async_get_throughput(self) -> dict:
+        return await self._rpc("system", "realtime") or {}
 
-    async def async_get_wan_status(self) -> Any:
-        return await self.get("/internet/status")
+    async def async_get_lan_status(self) -> dict:
+        return await self._rpc("network", "lan_status") or {}
 
-    async def async_get_vpn(self) -> Any:
-        return await self.get("/vpn/status")
+    async def async_get_dhcp_leases(self) -> list:
+        return await self._rpc("dhcp", "leases") or []
+
+    async def async_get_port_forwarding(self) -> list:
+        return await self._rpc("firewall", "port_forwards") or []
+
+    async def async_get_usb_devices(self) -> list:
+        return await self._rpc("system", "usb") or []
+
+    async def async_get_logs(self) -> list:
+        return await self._rpc("log", "read") or []
 
     # =====================================================
     # CONTROL API
     # =====================================================
-    async def async_set_wifi(self, iface: str, enabled: bool) -> Any:
+    async def async_set_wifi(self, iface: str, enabled: bool):
         if not iface:
             raise ValueError("iface required")
 
-        return await self.post(
-            "/wifi/set",
-            json={"name": iface, "enabled": enabled},
+        return await self._rpc(
+            "wifi",
+            "set",
+            {"name": iface, "enabled": enabled},
         )
 
-    async def async_set_vpn(self, enabled: bool) -> Any:
-        return await self.post(
-            "/vpn/set",
-            json={"enabled": enabled},
+    async def async_set_vpn(self, enabled: bool):
+        return await self._rpc(
+            "vpn",
+            "set",
+            {"enabled": enabled},
         )
 
-    async def async_reboot(self) -> Any:
-        return await self.post("/system/reboot")
+    async def async_reboot(self):
+        return await self._rpc("system", "reboot")
 
     # =====================================================
     # CLEANUP
     # =====================================================
     async def close(self):
-        """Session managed by HA."""
+        """Session managed by Home Assistant."""
         return
