@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import logging
 from typing import Any, Optional
 
-from aiohttp import (
-    ClientConnectorError,
-    ClientError,
-    ClientTimeout,
-)
+from aiohttp import ClientConnectorError, ClientError, ClientTimeout
 from yarl import URL
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,16 +39,7 @@ class GlinetApiError(Exception):
 # CLIENT
 # =========================================================
 class GLinetClient:
-    """
-    Home Assistant–ready GL.iNet RPC client.
-
-    Goals:
-    - Safe concurrency under HA polling
-    - Robust GL.iNet firmware handling
-    - Clean auth lifecycle
-    - Minimal deadlock risk
-    - Stable retry behavior
-    """
+    """Final locked, HACS-grade GL.iNet RPC client."""
 
     def __init__(
         self,
@@ -63,69 +51,126 @@ class GLinetClient:
     ):
         self._session = session
 
-        # SAFE URL HANDLING (fixes malformed /rpc cases)
         url = URL(base_url)
         self._http_base = str(url.with_path("").with_query(""))
 
-        # Auth state
-        self._token: Optional[str] = None
+        self._sid: Optional[str] = None
         self._username: Optional[str] = None
         self._password: Optional[str] = None
 
-        # Concurrency
         self._login_lock = asyncio.Lock()
         self._rpc_id = itertools.count(1)
 
-        # Timeout (HA-safe defaults)
+        self._login_strategy: Optional[str] = None
+
         self._timeout = ClientTimeout(
             total=timeout,
             connect=max(3, timeout // 2),
             sock_read=timeout,
         )
 
-        # Lifecycle
         self._close_session = close_session
 
     # =====================================================
-    # AUTH
+    # LOGIN
     # =====================================================
     async def login(self, username: str, password: str) -> None:
         self._username = username
         self._password = password
 
         async with self._login_lock:
-            if self._token:
+            if self._sid:
                 return
 
+            if self._session is None or getattr(self._session, "closed", False):
+                raise GlinetConnectionError("HTTP session invalid")
+
+            # Bootstrap session
             try:
-                async with self._session.get(
-                    self._http_base,
-                    timeout=self._timeout,
-                ) as resp:
+                async with self._session.get(self._http_base, timeout=self._timeout) as resp:
                     await resp.text()
+            except asyncio.TimeoutError:
+                raise GlinetTimeoutError("Bootstrap timeout")
             except Exception as e:
                 raise GlinetConnectionError(f"Router unreachable: {e}") from e
 
-            payload = self._build_payload(
-                method="login",
-                params={"username": username, "password": password},
-            )
+            attempts = [
+                ("v4-auth-null", lambda: self._build_payload(
+                    "call",
+                    [None, "auth", "login", {"username": username, "password": password}],
+                )),
+                ("v4-auth-empty", lambda: self._build_payload(
+                    "call",
+                    ["", "auth", "login", {"username": username, "password": password}],
+                )),
+                ("v4-auth-list", lambda: self._build_payload(
+                    "call",
+                    [None, "auth", "login", [username, password]],
+                )),
+                ("legacy", lambda: self._build_payload(
+                    "login",
+                    {"username": username, "password": password},
+                )),
+            ]
 
-            data = await self._raw_post("/rpc", json=payload)
+            if self._login_strategy:
+                attempts = sorted(
+                    attempts,
+                    key=lambda x: 0 if x[0] == self._login_strategy else 1,
+                )
 
-            if not isinstance(data, dict):
-                raise GlinetApiError("Invalid login response")
+            last_error = None
 
-            result = data.get("result") or {}
-            token = result.get("sid") or result.get("token")
+            for i, (name, builder) in enumerate(attempts):
+                try:
+                    payload = builder()
 
-            if not token:
-                raise GlinetAuthError(f"Authentication failed: {data}")
+                    _LOGGER.debug("GL.iNet login attempt: %s", name)
 
-            self._token = token
+                    data = await self._raw_post("/rpc", json=payload)
+                    _LOGGER.debug("Login response (%s): %s", name, data)
+
+                    if isinstance(data, dict) and data.get("error"):
+                        err = data["error"]
+
+                        if isinstance(err, dict):
+                            code = err.get("code")
+                            msg = str(err.get("message", "")).lower()
+
+                            # real auth failure → stop
+                            if code in (-32000, -32001) or "access" in msg:
+                                raise GlinetAuthError(err)
+
+                        last_error = err
+                        continue
+
+                    sid = self._extract_sid(data)
+
+                    if sid:
+                        self._sid = sid
+                        self._login_strategy = name
+                        _LOGGER.debug("Login success via %s", name)
+                        return
+
+                except GlinetAuthError:
+                    raise
+
+                except Exception as e:
+                    last_error = e
+
+                    if name == self._login_strategy:
+                        _LOGGER.debug("Cached login strategy failed, clearing")
+                        self._login_strategy = None
+
+                    _LOGGER.debug("Login attempt failed (%s): %s", name, e)
+
+                if i < len(attempts) - 1:
+                    await asyncio.sleep(min(0.2 * (i + 1), 1.0))
+
+            raise GlinetAuthError(f"Authentication failed (last error: {repr(last_error)})")
 
     async def ensure_logged_in(self):
-        if self._token:
+        if self._sid:
             return
 
         if not self._username or not self._password:
@@ -145,7 +190,7 @@ class GLinetClient:
         }
 
     # =====================================================
-    # CORE RPC
+    # RPC
     # =====================================================
     async def _rpc(
         self,
@@ -160,35 +205,43 @@ class GLinetClient:
         await self.ensure_logged_in()
 
         payload = self._build_payload(
-            method="call",
-            params=[self._token, namespace, method, params or {}],
+            "call",
+            [self._sid, namespace, method, params or {}],
         )
 
         try:
             data = await self._raw_post("/rpc", json=payload)
+            _LOGGER.debug("RPC %s.%s response: %s", namespace, method, data)
 
             if not isinstance(data, dict):
                 raise GlinetApiError("Invalid RPC response")
 
             if data.get("error"):
-                raise GlinetApiError(data["error"])
+                err = data["error"]
+
+                if isinstance(err, dict):
+                    code = err.get("code")
+                    msg = str(err.get("message", "")).lower()
+
+                    if code in (-32000, -32001) or "access" in msg:
+                        raise GlinetAuthError(err)
+
+                raise GlinetApiError(err)
 
             result = data.get("result")
+
             if result is None:
                 raise GlinetApiError(f"Missing result: {data}")
 
             return result
 
-        # -------------------------------------------------
-        # AUTH RECOVERY PATH
-        # -------------------------------------------------
         except GlinetAuthError:
             if retry and retry_count == 0:
-                _LOGGER.debug("Re-authenticating GL.iNet session")
+                _LOGGER.debug("Re-authenticating session")
 
-                self._token = None
+                self._sid = None
 
-                await asyncio.sleep(min(1.5, 0.3 * (retry_count + 1)))
+                await asyncio.sleep(min(0.3 * (retry_count + 1), 2.0))
                 await self.ensure_logged_in()
 
                 return await self._rpc(
@@ -200,20 +253,17 @@ class GLinetClient:
                 )
             raise
 
-        # -------------------------------------------------
-        # TIMEOUT NORMALIZATION
-        # -------------------------------------------------
         except asyncio.TimeoutError:
             raise GlinetTimeoutError("RPC timeout")
 
     # =====================================================
-    # HTTP LAYER
+    # HTTP
     # =====================================================
     async def _raw_post(self, path: str, **kwargs) -> Any:
-        if not self._session:
-            raise GlinetConnectionError("Session not initialized")
+        if self._session is None or getattr(self._session, "closed", False):
+            raise GlinetConnectionError("HTTP session invalid")
 
-        url = f"{self._http_base}{path}"
+        url = str(URL(self._http_base) / path.lstrip("/"))
 
         headers = kwargs.pop("headers", {})
         headers.update(
@@ -235,18 +285,18 @@ class GLinetClient:
 
                 text = await resp.text()
 
-                # PRESERVE ERROR CONTEXT (important for router debugging)
                 if resp.status >= 400:
-                    raise GlinetHTTPError(
-                        f"HTTP {resp.status}: {text[:300]}"
-                    )
+                    raise GlinetHTTPError(f"HTTP {resp.status}: {text[:300]}")
 
                 try:
-                    return await resp.json()
-                except Exception as e:
-                    raise GlinetApiError(
-                        f"Invalid JSON response: {e} | body={text[:200]}"
-                    ) from e
+                    return await resp.json(content_type=None)
+                except Exception:
+                    try:
+                        return json.loads(text)
+                    except Exception as e:
+                        raise GlinetApiError(
+                            f"Invalid JSON: {e} | body={text[:200]}"
+                        ) from e
 
         except ClientConnectorError as e:
             raise GlinetConnectionError(str(e)) from e
@@ -255,10 +305,32 @@ class GLinetClient:
             raise GlinetConnectionError(str(e)) from e
 
         except asyncio.TimeoutError:
-            raise GlinetTimeoutError("Request timeout")
+            raise GlinetTimeoutError("HTTP timeout")
 
     # =====================================================
-    # API METHODS
+    # SID EXTRACTION
+    # =====================================================
+    def _extract_sid(self, data: Any) -> Optional[str]:
+        if not isinstance(data, dict):
+            return None
+
+        result = data.get("result") or {}
+
+        for key in ("sid", "token", "session"):
+            val = result.get(key)
+            if isinstance(val, str):
+                return val
+
+        for v in result.values():
+            if isinstance(v, dict):
+                for key in ("sid", "token"):
+                    if isinstance(v.get(key), str):
+                        return v[key]
+
+        return None
+
+    # =====================================================
+    # API
     # =====================================================
     async def async_get_system_info(self) -> dict:
         return await self._rpc("system", "info") or {}
@@ -278,11 +350,11 @@ class GLinetClient:
     async def async_get_wan_status(self) -> dict:
         return await self._rpc("network", "wan_status") or {}
 
-    async def async_get_throughput(self) -> dict:
-        return await self._rpc("system", "realtime") or {}
-
     async def async_get_lan_status(self) -> dict:
         return await self._rpc("network", "lan_status") or {}
+
+    async def async_get_throughput(self) -> dict:
+        return await self._rpc("system", "realtime") or {}
 
     async def async_get_dhcp_leases(self) -> list:
         return await self._rpc("dhcp", "leases") or []
@@ -297,21 +369,13 @@ class GLinetClient:
         return await self._rpc("log", "read") or []
 
     # =====================================================
-    # CONTROL METHODS
+    # CONTROL
     # =====================================================
     async def async_set_wifi(self, iface: str, enabled: bool):
-        return await self._rpc(
-            "wifi",
-            "set",
-            {"name": iface, "enabled": enabled},
-        )
+        return await self._rpc("wifi", "set", {"name": iface, "enabled": enabled})
 
     async def async_set_vpn(self, enabled: bool):
-        return await self._rpc(
-            "vpn",
-            "set",
-            {"enabled": enabled},
-        )
+        return await self._rpc("vpn", "set", {"enabled": enabled})
 
     async def async_reboot(self):
         return await self._rpc("system", "reboot")
