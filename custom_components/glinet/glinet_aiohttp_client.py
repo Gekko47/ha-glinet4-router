@@ -97,12 +97,31 @@ class GLinetClient:
             await self._bootstrap()
 
             challenge = await self._challenge(username)
-            if not challenge:
-                raise GlinetAuthError("Missing challenge response")
 
-            alg = challenge["alg"]
-            salt = challenge["salt"]
-            nonce = challenge["nonce"]
+            # -----------------------------
+            # Normalize response shape
+            # -----------------------------
+            if not isinstance(challenge, dict):
+                raise GlinetAuthError(f"Invalid challenge response: {challenge}")
+
+            # Handle error payload
+            if "error" in challenge:
+                raise GlinetAuthError(f"Challenge error: {challenge['error']}")
+
+            # Handle nested "result"
+            if "result" in challenge and isinstance(challenge["result"], dict):
+                challenge = challenge["result"]
+
+            # Validate required fields safely
+            try:
+                alg = challenge["alg"]
+                salt = challenge["salt"]
+                nonce = challenge["nonce"]
+            except KeyError as e:
+                raise GlinetAuthError(
+                    f"Missing field in challenge response: {e} | raw={challenge}"
+                ) from e
+
             hash_method = challenge.get("hash-method", "md5")
 
             cipher = self._cipher_password(alg, salt, password)
