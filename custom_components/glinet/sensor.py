@@ -1,295 +1,315 @@
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from .const import DOMAIN, SIGNAL_CLIENTS_UPDATED
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 
+# =========================================================
+# SYSTEM LOGS (SLOW COORDINATOR)
+# =========================================================
+class GlinetSystemLogsSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, slow_coordinator):
+        super().__init__(slow_coordinator)
+
+        self._attr_name = "System Logs"
+        self._attr_unique_id = "glinet_system_logs"
+        self._attr_translation_key = "system_logs"
+
+    @property
+    def state(self):
+        logs = (self.coordinator.data or {}).get("logs") or []
+        return len(logs)
+
+    @property
+    def extra_state_attributes(self):
+        logs = (self.coordinator.data or {}).get("logs") or []
+        return {
+            "last_50": logs[-50:],
+            "total": len(logs),
+        }
+
+
+# =========================================================
+# SETUP ENTRY
+# =========================================================
 async def async_setup_entry(hass, entry, async_add_entities):
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    device_identifiers = hass.data[DOMAIN][entry.entry_id]["device_identifiers"]
-    entities = {}
+    """Set up GL.iNet sensors."""
 
-    base = [
-        GlinetUptimeSensor(coordinator, device_identifiers),
-        GlinetRXSensor(coordinator, device_identifiers),
-        GlinetTXSensor(coordinator, device_identifiers),
-        GlinetCPUTemperatureSensor(coordinator, device_identifiers),
-        GlinetMemoryUsageSensor(coordinator, device_identifiers),
-        GlinetDiskUsageSensor(coordinator, device_identifiers),
-        GlinetFlashUsageSensor(coordinator, device_identifiers),
-        GlinetSystemLoadSensor(coordinator, device_identifiers),
-        GlinetWanIPSensor(coordinator, device_identifiers),
-        GlinetLanIPSensor(coordinator, device_identifiers),
-        GlinetConnectedDevicesSensor(coordinator, device_identifiers),
-        GlinetUSBSensor(coordinator, device_identifiers),
-        GlinetFirmwareVersionSensor(coordinator, device_identifiers),
-        GlinetDHCPLeasesSensor(coordinator, device_identifiers),
-        GlinetPortForwardingSensor(coordinator, device_identifiers),
-    ]
+    data = hass.data[DOMAIN][entry.entry_id]
 
-    async_add_entities(base)
+    fast = data["fast_coordinator"]
+    slow = data["slow_coordinator"]
 
-    def _devices():
-        new = []
-        for c in coordinator.data["clients"]:
-            mac = c.get("mac")
-            if mac and mac not in entities:
-                rx = ClientRX(coordinator, mac, device_identifiers)
-                tx = ClientTX(coordinator, mac, device_identifiers)
-                entities[mac] = True
-                new.extend([rx, tx])
-        if new:
-            async_add_entities(new)
+    entities: list[SensorEntity] = []
 
-    _devices()
-    async_dispatcher_connect(hass, SIGNAL_CLIENTS_UPDATED, _devices)
+    # =====================================================
+    # ROUTER REAL-TIME SENSORS (FAST)
+    # =====================================================
+    entities.extend(
+        [
+            GlinetUptimeSensor(fast),
+            GlinetRXSensor(fast),
+            GlinetTXSensor(fast),
+            GlinetCPUTemperatureSensor(fast),
+            GlinetMemoryUsageSensor(fast),
+            GlinetDiskUsageSensor(fast),
+            GlinetFlashUsageSensor(fast),
+            GlinetSystemLoadSensor(fast),
+            GlinetWanIPSensor(fast),
+            GlinetLanIPSensor(fast),
+            GlinetConnectedDevicesSensor(fast),
+            GlinetUSBSensor(fast),
+            GlinetFirmwareVersionSensor(fast),
+            GlinetDHCPLeasesSensor(fast),
+            GlinetPortForwardingSensor(fast),
+        ]
+    )
+
+    # logs come from slow coordinator
+    entities.append(GlinetSystemLogsSensor(slow))
+
+    async_add_entities(entities)
+
+    # =====================================================
+    # CLIENT ENTITIES (FAST COORDINATOR ONLY)
+    # =====================================================
+    existing_clients: set[str] = set()
+
+    def _add_clients():
+        new_entities: list[SensorEntity] = []
+
+        clients_by_mac = (fast.data or {}).get("clients_by_mac", {}) or {}
+
+        for mac in clients_by_mac:
+            if mac in existing_clients:
+                continue
+
+            existing_clients.add(mac)
+            new_entities.append(GlinetClientEntity(fast, mac))
+
+        if new_entities:
+            async_add_entities(new_entities)
+
+    _add_clients()
 
 
-class GlinetUptimeSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+# =========================================================
+# BASE SENSORS (FAST)
+# =========================================================
+class GlinetUptimeSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "Router Uptime"
-        self._attr_unique_id = "uptime"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_uptime"
 
     @property
     def state(self):
-        return self.coordinator.data["status"].get("uptime")
+        return (self.coordinator.data or {}).get("status", {}).get("uptime")
 
 
-class GlinetRXSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetRXSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "WAN Download"
-        self._attr_unique_id = "wan_rx"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_wan_rx"
 
     @property
     def state(self):
-        return self.coordinator.data["throughput"].get("rx")
+        return (self.coordinator.data or {}).get("throughput", {}).get("rx")
 
 
-class GlinetTXSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetTXSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "WAN Upload"
-        self._attr_unique_id = "wan_tx"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_wan_tx"
 
     @property
     def state(self):
-        return self.coordinator.data["throughput"].get("tx")
+        return (self.coordinator.data or {}).get("throughput", {}).get("tx")
 
 
-class GlinetCPUTemperatureSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetCPUTemperatureSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "CPU Temperature"
-        self._attr_unique_id = "cpu_temp"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_cpu_temp"
         self._attr_unit_of_measurement = "°C"
 
     @property
     def state(self):
-        return self.coordinator.data.get("system_info", {}).get("cpu_temp")
+        return (self.coordinator.data or {}).get("system_info", {}).get("cpu_temp")
 
 
-class GlinetMemoryUsageSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetMemoryUsageSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "Memory Usage"
-        self._attr_unique_id = "memory_usage"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_memory"
         self._attr_unit_of_measurement = "%"
 
     @property
     def state(self):
-        return self.coordinator.data.get("system_info", {}).get("memory_percent")
+        return (self.coordinator.data or {}).get("system_info", {}).get("memory_percent")
 
 
-class GlinetDiskUsageSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetDiskUsageSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "Disk Usage"
-        self._attr_unique_id = "disk_usage"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_disk"
         self._attr_unit_of_measurement = "%"
 
     @property
     def state(self):
-        return self.coordinator.data.get("system_info", {}).get("disk_percent")
+        return (self.coordinator.data or {}).get("system_info", {}).get("disk_percent")
 
 
-class GlinetFlashUsageSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetFlashUsageSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "Flash Usage"
-        self._attr_unique_id = "flash_usage"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_flash"
         self._attr_unit_of_measurement = "%"
 
     @property
     def state(self):
-        return self.coordinator.data.get("system_info", {}).get("flash_percent")
+        return (self.coordinator.data or {}).get("system_info", {}).get("flash_percent")
 
 
-class GlinetSystemLoadSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetSystemLoadSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "System Load"
-        self._attr_unique_id = "system_load"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_load"
 
     @property
     def state(self):
-        load = self.coordinator.data.get("system_info", {}).get("load_average")
-        return load
+        return (self.coordinator.data or {}).get("system_info", {}).get("load_average")
 
     @property
     def extra_state_attributes(self):
-        load_data = self.coordinator.data.get("system_info", {}).get("load_average_detailed", {})
-        return {
-            "1min": load_data.get("1min"),
-            "5min": load_data.get("5min"),
-            "15min": load_data.get("15min"),
-        }
+        return (self.coordinator.data or {}).get("system_info", {}).get(
+            "load_average_detailed", {}
+        )
 
 
-class GlinetWanIPSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
-        self._attr_name = "WAN IP Address"
-        self._attr_unique_id = "wan_ip"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+class GlinetWanIPSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
+        self._attr_name = "WAN IP"
+        self._attr_unique_id = "glinet_wan_ip"
 
     @property
     def state(self):
-        return self.coordinator.data.get("wan_status", {}).get("ip")
+        return (self.coordinator.data or {}).get("wan_status", {}).get("ip")
 
 
-class GlinetLanIPSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
-        self._attr_name = "LAN IP Address"
-        self._attr_unique_id = "lan_ip"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+class GlinetLanIPSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
+        self._attr_name = "LAN IP"
+        self._attr_unique_id = "glinet_lan_ip"
 
     @property
     def state(self):
-        return self.coordinator.data.get("lan_status", {}).get("ip")
+        return (self.coordinator.data or {}).get("lan_status", {}).get("ip")
 
 
-class GlinetConnectedDevicesSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetConnectedDevicesSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "Connected Devices"
-        self._attr_unique_id = "connected_devices"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_clients_count"
 
     @property
     def state(self):
-        return len(self.coordinator.data.get("clients", []))
+        return len((self.coordinator.data or {}).get("clients_by_mac", {}))
 
 
-class GlinetUSBSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetUSBSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "USB Devices"
-        self._attr_unique_id = "usb_devices"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_usb"
 
     @property
     def state(self):
-        usb_devices = self.coordinator.data.get("usb_devices", [])
-        return len(usb_devices)
+        return len((self.coordinator.data or {}).get("usb_devices") or [])
 
     @property
     def extra_state_attributes(self):
-        return {"devices": self.coordinator.data.get("usb_devices", [])}
+        return {"devices": (self.coordinator.data or {}).get("usb_devices") or []}
 
 
-class GlinetFirmwareVersionSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
-        self._attr_name = "Firmware Version"
-        self._attr_unique_id = "firmware_version"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+class GlinetFirmwareVersionSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
+        self._attr_name = "Firmware"
+        self._attr_unique_id = "glinet_firmware"
 
     @property
     def state(self):
-        return self.coordinator.data.get("firmware", {}).get("version")
+        return (self.coordinator.data or {}).get("system_info", {}).get("firmware_version")
 
 
-class GlinetDHCPLeasesSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
+class GlinetDHCPLeasesSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
         self._attr_name = "DHCP Leases"
-        self._attr_unique_id = "dhcp_leases"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+        self._attr_unique_id = "glinet_dhcp"
 
     @property
     def state(self):
-        leases = self.coordinator.data.get("dhcp_leases", [])
-        return len(leases)
+        return len((self.coordinator.data or {}).get("dhcp_leases") or [])
 
     @property
     def extra_state_attributes(self):
-        return {"leases": self.coordinator.data.get("dhcp_leases", [])}
+        return {"leases": (self.coordinator.data or {}).get("dhcp_leases") or []}
 
 
-class GlinetPortForwardingSensor(SensorEntity):
-    def __init__(self, coordinator, device_identifiers):
-        self.coordinator = coordinator
-        self._attr_name = "Port Forwarding Rules"
-        self._attr_unique_id = "port_forwarding"
-        self._attr_device_info = {"identifiers": {device_identifiers}}
+class GlinetPortForwardingSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator):
+        super().__init__(coordinator)
+        self._attr_name = "Port Forwarding"
+        self._attr_unique_id = "glinet_port_forwarding"
 
     @property
     def state(self):
-        rules = self.coordinator.data.get("port_forwarding", [])
-        return len(rules)
+        return len((self.coordinator.data or {}).get("port_forwarding") or [])
 
     @property
     def extra_state_attributes(self):
-        return {"rules": self.coordinator.data.get("port_forwarding", [])}
+        return {"rules": (self.coordinator.data or {}).get("port_forwarding") or []}
 
 
-class ClientRX(SensorEntity):
-    def __init__(self, coordinator, mac, device_identifiers):
-        self.coordinator = coordinator
+# =========================================================
+# CLIENT ENTITY
+# =========================================================
+class GlinetClientEntity(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, mac: str):
+        super().__init__(coordinator)
         self.mac = mac
-        self.device_identifiers = device_identifiers
-        self._client = None
-        self._update_client()
 
-    def _update_client(self):
-        self._client = next((c for c in self.coordinator.data["clients"] if c.get("mac") == self.mac), None)
-        name = self._client.get("name", self.mac) if self._client else self.mac
-        self._attr_name = f"{name} Download"
-        self._attr_unique_id = f"{self.mac}_rx"
-        self._attr_device_info = {"identifiers": {self.device_identifiers}}
+        self._attr_unique_id = f"glinet_client_{mac}"
+        self._attr_name = mac
+
+    @property
+    def client(self):
+        return (self.coordinator.data or {}).get("clients_by_mac", {}).get(self.mac)
 
     @property
     def state(self):
-        self._update_client()
-        return self._client.get("rx") if self._client else None
-
-
-class ClientTX(SensorEntity):
-    def __init__(self, coordinator, mac, device_identifiers):
-        self.coordinator = coordinator
-        self.mac = mac
-        self.device_identifiers = device_identifiers
-        self._client = None
-        self._update_client()
-
-    def _update_client(self):
-        self._client = next((c for c in self.coordinator.data["clients"] if c.get("mac") == self.mac), None)
-        name = self._client.get("name", self.mac) if self._client else self.mac
-        self._attr_name = f"{name} Upload"
-        self._attr_unique_id = f"{self.mac}_tx"
-        self._attr_device_info = {"identifiers": {self.device_identifiers}}
+        c = self.client
+        return c.get("ip") if c else None
 
     @property
-    def state(self):
-        self._update_client()
-        return self._client.get("tx") if self._client else None
+    def extra_state_attributes(self):
+        return self.client or {}

@@ -1,15 +1,26 @@
 {
   "domain": "glinet",
   "name": "GL.iNet Router",
-  "version": "0.2.2-alpha.6",
+  "version": "0.3.1",
   "documentation": "https://github.com/Gekko47/ha-glinet4-router",
   "issue_tracker": "https://github.com/Gekko47/ha-glinet4-router/issues",
   "codeowners": ["@Gekko47"],
-  "requirements": ["gli4py==0.0.16"],
+
+  "requirements": [],
+
   "iot_class": "local_polling",
+
   "config_flow": true,
+
   "integration_type": "hub",
+
   "zeroconf": ["_glinet._tcp.local."],
+
   "dependencies": [],
-  "dhcp": [{ "hostname": "*gl-*", "macaddress": "9483C4*" }]
+
+  "dhcp": [
+    {
+      "hostname": "*gl-*"
+    }
+  ]
 }

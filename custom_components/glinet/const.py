@@ -1,10 +1,19 @@
 DOMAIN = "glinet"
 API_PATH = "/rpc"
 
-DEFAULT_HOST = "http://192.168.8.1"
+# -------------------------
+# DEFAULTS (UI ONLY)
+# -------------------------
+DEFAULT_HOST = "192.168.8.1"
 DEFAULT_USERNAME = "root"
-DEFAULT_PASSWORD = "goodlife"
+DEFAULT_PASSWORD = ""
 
-SCAN_INTERVAL = 30
+# -------------------------
+# PERFORMANCE
+# -------------------------
+SCAN_INTERVAL = 30  # seconds
 
+# -------------------------
+# LEGACY EVENT SIGNALS (DEPRECATE)
+# -------------------------
 SIGNAL_CLIENTS_UPDATED = "glinet_clients_updated"

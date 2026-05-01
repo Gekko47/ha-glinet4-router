@@ -1,13 +1,13 @@
-"""Config flow for GL.iNet integration."""
+"""GL.iNet Config Flow (HA 2026.4 - Zeroconf + Reauth + hardened validation)."""
 
 from __future__ import annotations
 
 import logging
-import asyncio
-import aiohttp
 from typing import Any
 
 import voluptuous as vol
+
+from aiohttp import ClientConnectorError, ClientResponseError, ClientError
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
@@ -15,33 +15,40 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-
-from gli4py import GLinet
-from gli4py.error_handling import NonZeroResponse
-from uplink import AiohttpClient
-
-from .const import DOMAIN, API_PATH, DEFAULT_HOST, DEFAULT_USERNAME, DEFAULT_PASSWORD
+from .const import DOMAIN, API_PATH
+from .glinet_aiohttp_client import GLinetClient
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_MAC = "mac"
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_HOST, default=DEFAULT_HOST): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
-        ),
-        vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): selector.TextSelector(),
-        vol.Required(CONF_PASSWORD, default=DEFAULT_PASSWORD): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-        ),
-    }
-)
+# =========================================================
+# HELPERS
+# =========================================================
+def normalize_host(host: str) -> str:
+    """Standardise router host input."""
+    return (host or "").strip().replace("http://", "").replace("https://", "").lower()
 
 
+def build_schema(default_host: str | None = None):
+    """Single schema generator (prevents duplication bugs)."""
 
+    return vol.Schema(
+        {
+            vol.Optional(CONF_HOST, default=default_host or ""): selector.TextSelector(),
+            vol.Required(CONF_USERNAME): selector.TextSelector(),
+            vol.Required(CONF_PASSWORD): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.PASSWORD
+                )
+            ),
+        }
+    )
+
+
+# =========================================================
+# ERRORS
+# =========================================================
 class CannotConnect(HomeAssistantError):
     pass
 
@@ -50,130 +57,190 @@ class InvalidAuth(HomeAssistantError):
     pass
 
 
-class TestingHub:
-    """GL.iNet connection test using gli4py."""
-
-    def __init__(self, host: str, username: str, hass: HomeAssistant) -> None:
-        self.router = GLinet(
-            base_url=host + API_PATH,
-            client=AiohttpClient(session=async_get_clientsession(hass)),
-            sync=False,
-        )
-
-        self.username = username
-        self.mac = ""
-        self.model = ""
-
-    async def validate(self, password: str) -> bool:
-        try:
-            await self.router.login(self.username, password)
-
-            info = await self.router.router_info()
-            if not isinstance(info, dict):
-                info = {}
-
-            self.mac = info.get("mac", "")
-            self.model = info.get("model", "GL.iNet")
-
-            return True
-
-        except NonZeroResponse as e:
-            _LOGGER.debug("Auth rejected by device: %s", e)
-            return False
-
-        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-            _LOGGER.debug("Router timeout: %s", e)
-            raise CannotConnect from e
-
-        except OSError as e:
-            _LOGGER.debug("Network error: %s", e)
-            raise CannotConnect from e
-
-        except Exception as e:
-            _LOGGER.exception("Unexpected router error during GL.iNet validation")
-            raise CannotConnect from e
+class InvalidResponse(HomeAssistantError):
+    pass
 
 
-async def validate_input(data: dict[str, Any], hass: HomeAssistant) -> dict[str, Any]:
-    hub = TestingHub(
-        host=data[CONF_HOST],
-        username=data[CONF_USERNAME],
-        hass=hass,
+# =========================================================
+# VALIDATION (SOURCE OF TRUTH)
+# =========================================================
+async def validate_input(hass: HomeAssistant, data: dict) -> dict:
+    """Validate router credentials and fetch system info."""
+
+    host = normalize_host(data.get(CONF_HOST, ""))
+
+    if not host:
+        raise CannotConnect("Host is required")
+
+    api = GLinetClient(
+        session=async_get_clientsession(hass),
+        base_url=f"http://{host}{API_PATH}",
     )
 
     try:
-        ok = await hub.validate(data[CONF_PASSWORD])
-    except CannotConnect:
-        raise
+        await api.login(data[CONF_USERNAME], data[CONF_PASSWORD])
+        info = await api.async_get_system_info()   # ✅ FIXED
 
-    if not ok:
-        raise InvalidAuth
+    except ClientResponseError as e:
+        if e.status in (401, 403):
+            raise InvalidAuth("Invalid credentials") from e
+        raise CannotConnect("Router rejected request") from e
+
+    except (ClientConnectorError, ClientError) as e:
+        raise CannotConnect("Router unreachable") from e
+
+    except Exception:
+        _LOGGER.exception("Unexpected router error")
+        raise InvalidResponse("Invalid router response") from None
+
+    if not isinstance(info, dict):
+        raise InvalidResponse("Invalid system response")
+
+    mac = (info.get("mac") or "").lower().strip()
 
     return {
-        "title": f"GL.iNet ({hub.model})",
-        CONF_MAC: hub.mac,
-        "model": hub.model,
-        "data": data,
+        "title": f"GL.iNet ({info.get('model', 'Router')})",
+        "model": info.get("model", "GL.iNet"),
+        "mac": mac,
+        "host": host,
     }
 
 
+# =========================================================
+# CONFIG FLOW
+# =========================================================
 class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle GL.iNet config flow."""
+    """GL.iNet router config flow (Zeroconf + Reauth)."""
 
     VERSION = 1
 
-    async def async_step_zeroconf(self, discovery_info):
-        """Handle Zeroconf discovery."""
+    def __init__(self) -> None:
+        self._discovered_host: str | None = None
+        self._reauth_entry: config_entries.ConfigEntry | None = None
 
-        hostname = (discovery_info.hostname or "").lower()
+    # -----------------------------------------------------
+    # USER FLOW
+    # -----------------------------------------------------
+    async def async_step_user(self, user_input=None):
+        return await self.async_step_auth()
 
-        if not hostname.startswith("gl"):
-            return self.async_abort(reason="not_glinet")
+    # -----------------------------------------------------
+    # ZEROCONF
+    # -----------------------------------------------------
+    async def async_step_zeroconf(self, discovery_info: dict[str, Any]):
+        host = discovery_info.get("ip_address") or discovery_info.get("host")
 
-        host = discovery_info.host
+        if not host:
+            return self.async_abort(reason="no_devices_found")
 
-        return await self.async_step_user(
-            {
-                CONF_HOST: host,
-            }
-        )
-        
-    
-    @staticmethod
-    def _normalize_mac(mac: str | None) -> str:
-        if not mac:
-            return ""
-        return mac.lower().replace(":", "").replace("-", "")
+        self._discovered_host = normalize_host(str(host))
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None):
+        return await self.async_step_auth()
+
+    # -----------------------------------------------------
+    # AUTH STEP
+    # -----------------------------------------------------
+    async def async_step_auth(self, user_input=None):
         errors = {}
+
+        schema = build_schema(self._discovered_host)
 
         if user_input is not None:
             try:
-                info = await validate_input(user_input, self.hass)
+                info = await validate_input(self.hass, user_input)
+
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
 
             except CannotConnect:
                 errors["base"] = "cannot_connect"
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except Exception as e:
-                _LOGGER.exception("Unexpected error during GL.iNet configuration: %s", e)
+
+            except InvalidResponse:
+                errors["base"] = "unknown"
+
+            except Exception:
+                _LOGGER.exception("Unexpected config flow error")
                 errors["base"] = "unknown"
 
             else:
-                mac = self._normalize_mac(info.get(CONF_MAC))
-                unique_id = mac or info.get("model", "") or user_input[CONF_HOST].lower()
+                unique_id = info.get("mac") or info.get("host")
+
+                if not unique_id:
+                    unique_id = normalize_host(user_input.get(CONF_HOST, ""))
 
                 await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
 
                 return self.async_create_entry(
                     title=info["title"],
-                    data=info["data"],
+                    data={
+                        CONF_HOST: normalize_host(user_input.get(CONF_HOST, self._discovered_host or "")),
+                        CONF_USERNAME: user_input[CONF_USERNAME],
+                        CONF_PASSWORD: user_input[CONF_PASSWORD],
+                    },
                 )
 
         return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            step_id="auth",
+            data_schema=schema,
+            errors=errors,
+        )
+
+    # -----------------------------------------------------
+    # REAUTH FLOW
+    # -----------------------------------------------------
+    async def async_step_reauth(self, entry_data: dict[str, Any]):
+        entry_id = self.context.get("entry_id")
+
+        if entry_id:
+            self._reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
+
+        if not self._reauth_entry:
+            return self.async_abort(reason="no_entry")
+
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None):
+        errors = {}
+
+        if user_input is not None:
+            try:
+                info = await validate_input(self.hass, user_input)
+
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+
+            except InvalidResponse:
+                errors["base"] = "unknown"
+
+            except Exception:
+                _LOGGER.exception("Unexpected reauth error")
+                errors["base"] = "unknown"
+
+            else:
+                if not self._reauth_entry:
+                    return self.async_abort(reason="no_entry")
+
+                self.hass.config_entries.async_update_entry(
+                    self._reauth_entry,
+                    data={
+                        CONF_HOST: normalize_host(user_input.get(CONF_HOST, "")),
+                        CONF_USERNAME: user_input[CONF_USERNAME],
+                        CONF_PASSWORD: user_input[CONF_PASSWORD],
+                    },
+                )
+
+                await self.hass.config_entries.async_reload(
+                    self._reauth_entry.entry_id
+                )
+
+                return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=build_schema(),
             errors=errors,
         )

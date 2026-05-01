@@ -1,73 +1,135 @@
+from __future__ import annotations
+
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
 from .const import DOMAIN, API_PATH
-from .services import async_setup_services, async_unload_services
+from .services import async_setup_services
+from .glinet_aiohttp_client import GLinetClient
 
-from gli4py import GLinet
-from uplink import AiohttpClient
+from .coordinator.fast_coordinator import GlinetFastCoordinator
+from .coordinator.slow_coordinator import GlinetSlowCoordinator
 
-PLATFORMS = ["sensor", "binary_sensor", "device_tracker", "switch", "button"]
+_LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = ["sensor", "binary_sensor", "switch", "button"]
 
 
-async def async_setup(hass: HomeAssistant, config):
-    """Set up the GL.iNet router integration."""
+# =========================================================
+# HELPERS
+# =========================================================
+def normalize_host(host: str) -> str:
+    return (host or "").strip().replace("http://", "").replace("https://", "")
+
+
+# =========================================================
+# GLOBAL SETUP
+# =========================================================
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     await async_setup_services(hass)
     return True
 
 
-async def async_unload(hass: HomeAssistant):
-    """Unload the GL.iNet router integration."""
-    await async_unload_services(hass)
-    return True
+# =========================================================
+# ENTRY SETUP
+# =========================================================
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
+    hass.data.setdefault(DOMAIN, {})
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    from .coordinator import GlinetCoordinator
+    host = normalize_host(entry.data["host"])
 
-    api = GLinet(
-        base_url=entry.data["host"] + API_PATH,
-        client=AiohttpClient(session=async_get_clientsession(hass)),
-        sync=False,
+    # =====================================================
+    # API CLIENT
+    # =====================================================
+    api = GLinetClient(
+        session=async_get_clientsession(hass),
+        base_url=f"http://{host}{API_PATH}",
     )
 
-    await api.login(entry.data["username"], entry.data["password"])
+    # =====================================================
+    # COORDINATORS
+    # =====================================================
+    fast_coordinator = GlinetFastCoordinator(hass, api)
+    slow_coordinator = GlinetSlowCoordinator(hass, api)
 
-    coordinator = GlinetCoordinator(hass, api)
-    await coordinator.async_config_entry_first_refresh()
+    hass.data[DOMAIN][entry.entry_id] = {
+        "api": api,
+        "fast_coordinator": fast_coordinator,
+        "slow_coordinator": slow_coordinator,
+    }
 
-    # Create device
+    # =====================================================
+    # INITIAL REFRESH (FAST FIRST)
+    # =====================================================
+    try:
+        await fast_coordinator.async_config_entry_first_refresh()
+    except Exception:
+        _LOGGER.exception("Fast coordinator initial refresh failed")
+
+    try:
+        await slow_coordinator.async_config_entry_first_refresh()
+    except Exception:
+        _LOGGER.exception("Slow coordinator initial refresh failed")
+
+    # =====================================================
+    # DEVICE REGISTRY (SAFE FALLBACK STRATEGY)
+    # =====================================================
+    system_info = (fast_coordinator.data or {}).get("system_info") or {}
+
+    mac = (
+        system_info.get("mac")
+        or (slow_coordinator.data or {}).get("system_info", {}).get("mac")
+        or host
+    )
+
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, entry.data["host"])},
+        identifiers={(DOMAIN, mac)},
         manufacturer="GL.iNet",
-        model="Router",
-        name=f"GL.iNet Router ({entry.data['host']})",
-        sw_version=coordinator.data.get("system_info", {}).get("firmware_version"),
+        model=system_info.get("model", "Router"),
+        name=f"GL.iNet Router ({host})",
+        sw_version=system_info.get("firmware_version"),
     )
 
-    device_identifiers = (DOMAIN, entry.data["host"])
-
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {
-        "api": api,
-        "coordinator": coordinator,
-        "device_identifiers": device_identifiers,
-        "host": entry.data["host"],
-    }
-    hass.data[DOMAIN][entry.data["host"]] = hass.data[DOMAIN][entry.entry_id]
-
+    # =====================================================
+    # PLATFORMS
+    # =====================================================
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    data = hass.data[DOMAIN].pop(entry.entry_id)
-    hass.data[DOMAIN].pop(data["host"], None)
+# =========================================================
+# ENTRY UNLOAD
+# =========================================================
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
-    await data["api"].close()
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+
+        if data:
+            api = data.get("api")
+            if api:
+                await api.close()
+
+            # IMPORTANT: explicitly stop coordinators
+            fast = data.get("fast_coordinator")
+            slow = data.get("slow_coordinator")
+
+            # safe shutdown if running tasks exist
+            for c in (fast, slow):
+                if hasattr(c, "async_stop"):
+                    try:
+                        await c.async_stop()
+                    except Exception:
+                        _LOGGER.debug("Coordinator shutdown failed")
+
+    return unload_ok

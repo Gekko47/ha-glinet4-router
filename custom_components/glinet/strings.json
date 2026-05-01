@@ -15,6 +15,13 @@
           "password": "Password"
         }
       }
+    },
+    "entity": {
+      "sensor": {
+        "system_logs": {
+          "name": "System Logs"
+        }
+      }
     }
   }
 }
