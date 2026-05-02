@@ -41,13 +41,14 @@ class GlinetApiError(Exception):
 # =========================================================
 class GLinetClient:
     """
-    GL.iNet + LuCI dual-stack client (hardened, HA-safe)
+    Hardened GL.iNet + LuCI dual-stack client
 
-    Key guarantees:
-    - deterministic backend selection (no ambiguity fallback loops)
-    - correct auth vs rpc endpoint separation
-    - safe reauth (single-cycle retry only)
-    - robust SID validation (prevents ghost sessions)
+    Guarantees:
+    - no ghost SID acceptance
+    - strict backend detection (no false LuCI switching)
+    - SID validated before use
+    - single-flight login + reauth protection
+    - safe RPC retry handling
     """
 
     def __init__(
@@ -67,24 +68,27 @@ class GLinetClient:
 
         self._login_lock = asyncio.Lock()
         self._rpc_lock = asyncio.Lock()
-        self._rpc_id = itertools.count(1)
+        self._reauth_lock = asyncio.Lock()
 
+        self._rpc_id = itertools.count(1)
         self._timeout = ClientTimeout(total=timeout, connect=max(3, timeout // 2))
         self._close_session = close_session
 
-        # backend state (STRICT)
-        self._mode: Optional[str] = None  # "gl" | "luci"
-        self._rpc_base: str = "/rpc"
-        self._auth_base: str = "/rpc"
+        self._mode: Optional[str] = None
+        self._rpc_base = "/rpc"
+        self._auth_base = "/rpc"
 
     # =====================================================
-    # BACKEND DETECTION (STRICT + SAFE)
+    # BACKEND DETECTION (STRICT & SAFE)
     # =====================================================
     async def _detect_backend(self):
         if self._mode:
             return
 
-        # ---- GL backend probe (must include real challenge schema)
+        gl_ok = False
+        luci_ok = False
+
+        # ---------------- GL PROBE ----------------
         try:
             r = await self._raw_post("/rpc", json={
                 "jsonrpc": "2.0",
@@ -93,20 +97,19 @@ class GLinetClient:
                 "params": {"username": "root"},
             })
 
+            result = r.get("result") if isinstance(r, dict) else None
+
             if (
-                isinstance(r, dict)
-                and isinstance(r.get("result"), dict)
-                and "salt" in r["result"]
-                and "nonce" in r["result"]
+                isinstance(result, dict)
+                and isinstance(result.get("salt"), str)
+                and isinstance(result.get("nonce"), str)
             ):
-                self._mode = "gl"
-                self._rpc_base = "/rpc"
-                self._auth_base = "/rpc"
-                return
+                gl_ok = True
+
         except Exception:
             pass
 
-        # ---- LuCI probe (auth endpoint only)
+        # ---------------- LUCI PROBE (FIXED STRICT CHECK) ----------------
         try:
             r = await self._raw_post("/cgi-bin/luci/rpc/auth", json={
                 "method": "login",
@@ -114,21 +117,28 @@ class GLinetClient:
                 "id": 1,
             })
 
-            if isinstance(r, dict):
-                self._mode = "luci"
-                self._rpc_base = "/cgi-bin/luci/rpc"
-                self._auth_base = "/cgi-bin/luci/rpc/auth"
-                return
+            # FIX: only accept real structured responses
+            if (
+                isinstance(r, dict)
+                and ("result" in r or "sid" in r or "token" in r)
+                and "html" not in str(r).lower()
+            ):
+                luci_ok = True
+
         except Exception:
             pass
 
-        # safe fallback
-        self._mode = "gl"
-        self._rpc_base = "/rpc"
-        self._auth_base = "/rpc"
+        if luci_ok and not gl_ok:
+            self._mode = "luci"
+            self._rpc_base = "/cgi-bin/luci/rpc"
+            self._auth_base = "/cgi-bin/luci/rpc/auth"
+        else:
+            self._mode = "gl"
+            self._rpc_base = "/rpc"
+            self._auth_base = "/rpc"
 
     # =====================================================
-    # HASHING (gli4py dual variant)
+    # HASHING (GL AUTH)
     # =====================================================
     def _hashes(self, username: str, password: str, salt: str, nonce: str):
         a = hashlib.md5((password + salt).encode()).hexdigest()
@@ -140,74 +150,105 @@ class GLinetClient:
         return [h1, h2]
 
     # =====================================================
-    # LOGIN (NO RECURSION, SINGLE RETRY WINDOW)
+    # SID VALIDATION (STRICT)
+    # =====================================================
+    async def _validate_sid(self, sid: str) -> bool:
+        try:
+            r = await self._raw_post(self._rpc_base, json={
+                "jsonrpc": "2.0",
+                "id": next(self._rpc_id),
+                "method": "call",
+                "params": [sid, "system", "board", {}],
+            })
+
+            return (
+                isinstance(r, dict)
+                and r.get("error") is None
+                and r.get("result") is not None
+            )
+
+        except Exception:
+            return False
+
+    # =====================================================
+    # LOGIN (SAFE + NON-REENTRANT)
     # =====================================================
     async def login(self, username: str, password: str):
         self._username = username
         self._password = password
 
         async with self._login_lock:
-            self.sid = None
-            await self._detect_backend()
+            async with self._reauth_lock:
 
-            last = None
+                self.sid = None
+                await self._detect_backend()
 
-            for _ in range(3):
+                last = None
 
-                # ---------------- LUCI ----------------
-                if self._mode == "luci":
+                for _ in range(3):
+
+                    # ---------------- LUCI ----------------
+                    if self._mode == "luci":
+                        try:
+                            last = await self._raw_post(
+                                self._auth_base,
+                                json={
+                                    "method": "login",
+                                    "params": [username, password],
+                                    "id": next(self._rpc_id),
+                                },
+                            )
+
+                            sid = self._extract_sid(last)
+
+                            if sid and await self._validate_sid(sid):
+                                self.sid = sid
+                                return
+
+                        except Exception:
+                            pass
+
+                    # ---------------- GL ----------------
                     try:
-                        last = await self._raw_post(
-                            self._auth_base,
-                            json={
-                                "method": "login",
-                                "params": [username, password],
-                                "id": next(self._rpc_id),
-                            },
-                        )
+                        challenge = await self._raw_post(self._rpc_base, json={
+                            "jsonrpc": "2.0",
+                            "id": next(self._rpc_id),
+                            "method": "challenge",
+                            "params": {"username": username},
+                        })
 
-                        sid = self._extract_sid(last)
-                        if sid:
-                            self.sid = sid
-                            return
+                        result = challenge.get("result") if isinstance(challenge, dict) else None
+
+                        if not isinstance(result, dict):
+                            break  # prevents wasted retries
+
+                        salt = result.get("salt")
+                        nonce = result.get("nonce")
+
+                        if not salt or not nonce:
+                            continue
+
+                        for h in self._hashes(username, password, salt, nonce):
+                            last = await self._raw_post(self._rpc_base, json={
+                                "jsonrpc": "2.0",
+                                "id": next(self._rpc_id),
+                                "method": "login",
+                                "params": {"username": username, "hash": h},
+                            })
+
+                            sid = self._extract_sid(last)
+
+                            if sid and await self._validate_sid(sid):
+                                self.sid = sid
+                                return
 
                     except Exception:
                         pass
 
-                # ---------------- GL ----------------
-                try:
-                    challenge = await self._raw_post(self._rpc_base, json={
-                        "jsonrpc": "2.0",
-                        "id": next(self._rpc_id),
-                        "method": "challenge",
-                        "params": {"username": username},
-                    })
-
-                    challenge = challenge.get("result", challenge)
-
-                    salt = challenge["salt"]
-                    nonce = challenge["nonce"]
-
-                    for h in self._hashes(username, password, salt, nonce):
-                        last = await self._raw_post(self._rpc_base, json={
-                            "jsonrpc": "2.0",
-                            "id": next(self._rpc_id),
-                            "method": "login",
-                            "params": {"username": username, "hash": h},
-                        })
-
-                        sid = self._extract_sid(last)
-                        if sid:
-                            self.sid = sid
-                            return
-
-                except Exception:
-                    pass
-
-            raise GlinetAuthError(f"Login failed: {last}")
+                raise GlinetAuthError(f"Login failed: {last}")
 
     # =====================================================
-    # SID EXTRACTION (robust across firmware variants)
+    # SID EXTRACTION
     # =====================================================
     def _extract_sid(self, resp: Any):
         if not isinstance(resp, dict):
@@ -224,27 +265,24 @@ class GLinetClient:
         return resp.get("sid")
 
     # =====================================================
-    # SID VALIDATION (FIX: prevents ghost sessions)
+    # AUTH ERROR DETECTION
     # =====================================================
-    async def _validate_sid(self, sid: str) -> bool:
-        try:
-            r = await self._raw_post(self._rpc_base, json={
-                "jsonrpc": "2.0",
-                "id": next(self._rpc_id),
-                "method": "call",
-                "params": [sid, "system", "board", {}],
-            })
+    def _is_auth_error(self, err: Any) -> bool:
+        if isinstance(err, dict):
+            code = err.get("code")
+            msg = str(err.get("message", "")).lower()
+            return code == -32000 or "access denied" in msg or "session" in msg
 
-            return isinstance(r, dict) and "error" not in r
-        except Exception:
-            return False
+        return "access denied" in str(err).lower()
 
     # =====================================================
-    # RPC (SAFE REAUTH, NO LOOP STORMS)
+    # RPC (SAFE REAUTH, SINGLE CYCLE)
     # =====================================================
     async def _rpc(self, namespace: str, method: str, params=None):
         async with self._rpc_lock:
             await self.ensure_session()
+
+            reauth_done = False
 
             for _ in range(2):
 
@@ -259,14 +297,16 @@ class GLinetClient:
 
                 if isinstance(data, dict) and data.get("error"):
                     err = data["error"]
-                    msg = str(err).lower()
-                    code = err.get("code") if isinstance(err, dict) else None
 
-                    if code == -32000 or any(
-                        x in msg for x in ("access denied", "session", "unauthorized")
-                    ):
-                        self.sid = None
-                        await self.login(self._username, self._password)
+                    if self._is_auth_error(err):
+                        if reauth_done:
+                            raise GlinetAuthError("Repeated auth failure")
+
+                        reauth_done = True
+                        async with self._reauth_lock:
+                            self.sid = None
+                            await self.login(self._username, self._password)
+
                         continue
 
                     raise GlinetApiError(err)
