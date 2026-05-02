@@ -96,6 +96,8 @@ class GLinetClient:
             self._assert_session()
             await self._bootstrap()
 
+            _LOGGER.debug("GL.iNet login attempt as: %s", username)
+
             challenge = await self._challenge(username)
 
             # -----------------------------
@@ -104,15 +106,12 @@ class GLinetClient:
             if not isinstance(challenge, dict):
                 raise GlinetAuthError(f"Invalid challenge response: {challenge}")
 
-            # Handle error payload
             if "error" in challenge:
                 raise GlinetAuthError(f"Challenge error: {challenge['error']}")
 
-            # Handle nested "result"
             if "result" in challenge and isinstance(challenge["result"], dict):
                 challenge = challenge["result"]
 
-            # Validate required fields safely
             try:
                 alg = challenge["alg"]
                 salt = challenge["salt"]
@@ -124,18 +123,34 @@ class GLinetClient:
 
             hash_method = challenge.get("hash-method", "md5")
 
-            cipher = self._cipher_password(alg, salt, password)
+            cipher1, cipher2 = self._cipher_password(alg, salt, password)
 
-            login_hash = self._login_hash(hash_method, username, cipher, nonce)
+            last_resp = None
 
-            sid_resp = await self._get_sid(username, login_hash)
+            for idx, cipher in enumerate((cipher1, cipher2), start=1):
+                try:
+                    login_hash = self._login_hash(hash_method, username, cipher, nonce)
+                    sid_resp = await self._get_sid(username, login_hash)
+                    last_resp = sid_resp
 
-            sid = sid_resp.get("sid")
-            if not sid:
-                raise GlinetAuthError(f"Login failed: {sid_resp}")
+                    if not isinstance(sid_resp, dict):
+                        _LOGGER.debug("Login attempt %d returned non-dict: %s", idx, sid_resp)
+                        continue
 
-            self.sid = sid
-            _LOGGER.debug("GL.iNet login successful")
+                    if sid_resp.get("error"):
+                        _LOGGER.debug("Login attempt %d error: %s", idx, sid_resp["error"])
+                        continue
+
+                    sid = sid_resp.get("sid")
+                    if sid:
+                        self.sid = sid
+                        _LOGGER.debug("GL.iNet login successful (variant %d)", idx)
+                        return
+
+                except Exception as e:
+                    _LOGGER.debug("Login attempt %d failed: %s", idx, e)
+
+            raise GlinetAuthError(f"Login failed (both variants): {last_resp}")
 
     # =====================================================
     # SESSION RECOVERY ENTRYPOINT
@@ -350,17 +365,21 @@ class GLinetClient:
     # =====================================================
     # CRYPTO
     # =====================================================
-    def _cipher_password(self, alg: int, salt: str, password: str) -> str:
-        data = (salt + password).encode()
+    def _cipher_password(self, alg: int, salt: str, password: str) -> tuple[str, str]:
+        def hash_fn(data: bytes) -> str:
+            if alg == 1:
+                return hashlib.md5(data).hexdigest()
+            if alg == 5:
+                return hashlib.sha256(data).hexdigest()
+            if alg == 6:
+                return hashlib.sha512(data).hexdigest()
+            raise ValueError(f"Unsupported cipher algorithm: {alg}")
 
-        if alg == 1:
-            return hashlib.md5(data).hexdigest()
-        if alg == 5:
-            return hashlib.sha256(data).hexdigest()
-        if alg == 6:
-            return hashlib.sha512(data).hexdigest()
+        # Firmware inconsistency handling
+        attempt1 = hash_fn((salt + password).encode())
+        attempt2 = hash_fn((password + salt).encode())
 
-        raise ValueError("Unsupported cipher algorithm")
+        return attempt1, attempt2
 
     def _login_hash(self, method: str, username: str, cipher: str, nonce: str) -> str:
         data = f"{username}:{cipher}:{nonce}".encode()

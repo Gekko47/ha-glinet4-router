@@ -1,4 +1,4 @@
-"""GL.iNet Config Flow (HA 2026.4 - Zeroconf + Reauth + hardened validation)."""
+"""GL.iNet Config Flow (HA 2026.4 - Device picker + Auto-skip + Explicit UX + Full Error Mapping)."""
 
 from __future__ import annotations
 
@@ -24,24 +24,27 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # =========================================================
+# DEFAULTS
+# =========================================================
+DEFAULT_USERNAME = "root"
+DEFAULT_PASSWORD = "goodlife"
+DEFAULT_HOST = "192.168.8.1"
+
+
+# =========================================================
 # HELPERS
 # =========================================================
 def normalize_host(host: str) -> str:
-    """Standardise router host input."""
     return (host or "").strip().replace("http://", "").replace("https://", "").lower()
 
 
-def build_schema(default_host: str | None = None):
-    """Single schema generator (prevents duplication bugs)."""
-
+def build_auth_schema(default_host: str | None = None):
     return vol.Schema(
         {
-            vol.Optional(CONF_HOST, default=default_host or ""): selector.TextSelector(),
-            vol.Required(CONF_USERNAME): selector.TextSelector(),
-            vol.Required(CONF_PASSWORD): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.PASSWORD
-                )
+            vol.Optional(CONF_HOST, default=default_host or DEFAULT_HOST): selector.TextSelector(),
+            vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): selector.TextSelector(),
+            vol.Required(CONF_PASSWORD, default=DEFAULT_PASSWORD): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
             ),
         }
     )
@@ -62,16 +65,18 @@ class InvalidResponse(HomeAssistantError):
     pass
 
 
+class HostRequired(HomeAssistantError):
+    pass
+
+
 # =========================================================
-# VALIDATION (SOURCE OF TRUTH)
+# VALIDATION
 # =========================================================
 async def validate_input(hass: HomeAssistant, data: dict) -> dict:
-    """Validate router credentials and fetch system info."""
-
     host = normalize_host(data.get(CONF_HOST, ""))
 
     if not host:
-        raise CannotConnect("Host is required")
+        raise HostRequired
 
     api = GLinetClient(
         session=async_get_clientsession(hass),
@@ -80,28 +85,28 @@ async def validate_input(hass: HomeAssistant, data: dict) -> dict:
 
     try:
         await api.login(data[CONF_USERNAME], data[CONF_PASSWORD])
-        info = await api.async_get_system_info()   # ✅ FIXED
+        info = await api.async_get_system_info()
 
     except ClientResponseError as e:
         if e.status in (401, 403):
-            raise InvalidAuth("Invalid credentials") from e
-        raise CannotConnect("Router rejected request") from e
+            raise InvalidAuth from e
+        raise CannotConnect from e
 
     except (ClientConnectorError, ClientError) as e:
-        raise CannotConnect("Router unreachable") from e
+        raise CannotConnect from e
 
     except Exception:
         _LOGGER.exception("Unexpected router error")
-        raise InvalidResponse("Invalid router response") from None
+        raise InvalidResponse
 
     if not isinstance(info, dict):
-        raise InvalidResponse("Invalid system response")
+        raise InvalidResponse
 
     mac = (info.get("mac") or "").lower().strip()
 
     return {
         "title": f"GL.iNet ({info.get('model', 'Router')})",
-        "model": info.get("model", "GL.iNet"),
+        "model": info.get("model") or "GL.iNet",
         "mac": mac,
         "host": host,
     }
@@ -111,21 +116,81 @@ async def validate_input(hass: HomeAssistant, data: dict) -> dict:
 # CONFIG FLOW
 # =========================================================
 class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """GL.iNet router config flow (Zeroconf + Reauth)."""
-
     VERSION = 1
-
     options_flow_handler = GlinetOptionsFlow
 
     def __init__(self) -> None:
-        self._discovered_host: str | None = None
-        self._reauth_entry: config_entries.ConfigEntry | None = None
+        self._devices: list[dict[str, str]] = []
+        self._selected_host: str | None = None
 
     # -----------------------------------------------------
-    # USER FLOW
+    # USER STEP (EXPLICIT UX MODEL)
     # -----------------------------------------------------
     async def async_step_user(self, user_input=None):
-        return await self.async_step_auth()
+        devices = self._devices
+
+        # -------------------------------------------------
+        # NO DEVICES → EXPLICIT STATE (NO SILENT SKIP)
+        # -------------------------------------------------
+        if user_input is None and len(devices) == 0:
+            self._selected_host = None
+
+            schema = build_auth_schema(DEFAULT_HOST)
+
+            return self.async_show_form(
+                step_id="auth",
+                data_schema=schema,
+                description_placeholders={
+                    "warning": "No GL.iNet devices were discovered. Using default router address."
+                },
+                errors={},
+            )
+
+        # -------------------------------------------------
+        # SINGLE DEVICE → SAFE AUTO-SKIP
+        # -------------------------------------------------
+        if user_input is None and len(devices) == 1:
+            self._selected_host = devices[0]["host"]
+            return await self.async_step_auth()
+
+        # -------------------------------------------------
+        # MULTI DEVICE PICKER
+        # -------------------------------------------------
+        options = [
+            {
+                "label": f"{d.get('model') or 'GL.iNet'} ({d['host']})",
+                "value": d["host"],
+            }
+            for d in devices
+        ]
+
+        options.append(
+            {
+                "label": "Manual setup (enter host manually)",
+                "value": "manual",
+            }
+        )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "device",
+                    default=devices[0]["host"] if devices else "manual",
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                )
+            }
+        )
+
+        if user_input is not None:
+            choice = user_input["device"]
+            self._selected_host = None if choice == "manual" else choice
+            return await self.async_step_auth()
+
+        return self.async_show_form(step_id="user", data_schema=schema)
 
     # -----------------------------------------------------
     # ZEROCONF
@@ -136,36 +201,47 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not host:
             return self.async_abort(reason="no_devices_found")
 
-        self._discovered_host = normalize_host(str(host))
+        host = normalize_host(str(host))
 
-        # Try to get MAC for uniqueness check early
+        model = "GL.iNet"
+
         try:
-            session = async_get_clientsession(self.hass)
             api = GLinetClient(
-                session=session,
-                base_url=f"http://{self._discovered_host}{API_PATH}",
+                session=async_get_clientsession(self.hass),
+                base_url=f"http://{host}{API_PATH}",
             )
-            # Attempt basic connection without auth to get MAC
-            info = {"host": self._discovered_host}
-            unique_id = self._discovered_host
-            await self.async_set_unique_id(unique_id)
-            self._abort_if_unique_id_configured()
+            info = await api.async_get_system_info()
+            model = info.get("model") or model
         except Exception:
-            pass
+            model = model
 
-        return await self.async_step_auth()
+        if not any(d["host"] == host for d in self._devices):
+            self._devices.append(
+                {
+                    "host": host,
+                    "model": model or "GL.iNet",
+                }
+            )
+
+        await self.async_set_unique_id(host)
+        self._abort_if_unique_id_configured()
+
+        return await self.async_step_user()
 
     # -----------------------------------------------------
     # AUTH STEP
     # -----------------------------------------------------
     async def async_step_auth(self, user_input=None):
-        errors = {}
+        errors: dict[str, str] = {}
 
-        schema = build_schema(self._discovered_host)
+        schema = build_auth_schema(self._selected_host)
 
         if user_input is not None:
             try:
                 info = await validate_input(self.hass, user_input)
+
+            except HostRequired:
+                errors[CONF_HOST] = "host_required"
 
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
@@ -174,7 +250,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
 
             except InvalidResponse:
-                errors["base"] = "unknown"
+                errors["base"] = "invalid_response"
 
             except Exception:
                 _LOGGER.exception("Unexpected config flow error")
@@ -192,7 +268,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=info["title"],
                     data={
-                        CONF_HOST: normalize_host(user_input.get(CONF_HOST, self._discovered_host or "")),
+                        CONF_HOST: info["host"],
                         CONF_USERNAME: user_input[CONF_USERNAME],
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                     },
@@ -201,64 +277,5 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="auth",
             data_schema=schema,
-            errors=errors,
-        )
-
-    # -----------------------------------------------------
-    # REAUTH FLOW
-    # -----------------------------------------------------
-    async def async_step_reauth(self, entry_data: dict[str, Any]):
-        entry_id = self.context.get("entry_id")
-
-        if entry_id:
-            self._reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
-
-        if not self._reauth_entry:
-            return self.async_abort(reason="no_entry")
-
-        return await self.async_step_reauth_confirm()
-
-    async def async_step_reauth_confirm(self, user_input=None):
-        errors = {}
-
-        if user_input is not None:
-            try:
-                info = await validate_input(self.hass, user_input)
-
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-
-            except InvalidResponse:
-                errors["base"] = "unknown"
-
-            except Exception:
-                _LOGGER.exception("Unexpected reauth error")
-                errors["base"] = "unknown"
-
-            else:
-                if not self._reauth_entry:
-                    return self.async_abort(reason="no_entry")
-
-                self.hass.config_entries.async_update_entry(
-                    self._reauth_entry,
-                    data={
-                        CONF_HOST: normalize_host(user_input.get(CONF_HOST, "")),
-                        CONF_USERNAME: user_input[CONF_USERNAME],
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
-                    },
-                )
-
-                await self.hass.config_entries.async_reload(
-                    self._reauth_entry.entry_id
-                )
-
-                return self.async_abort(reason="reauth_successful")
-
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=build_schema(),
             errors=errors,
         )
