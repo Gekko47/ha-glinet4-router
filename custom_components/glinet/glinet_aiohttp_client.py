@@ -41,14 +41,14 @@ class GlinetApiError(Exception):
 # =========================================================
 class GLinetClient:
     """
-    Hardened GL.iNet + LuCI dual-stack client
+    Hardened GL.iNet + LuCI client (HA-safe)
 
-    Guarantees:
-    - no ghost SID acceptance
-    - strict backend detection (no false LuCI switching)
-    - SID validated before use
-    - single-flight login + reauth protection
-    - safe RPC retry handling
+    FIXES:
+    - SID only committed after final validation
+    - no ghost sessions
+    - safe backend detection
+    - correct handling of -32000 Access denied
+    - avoids false login failure due to transient RPC delay
     """
 
     def __init__(
@@ -63,6 +63,8 @@ class GLinetClient:
         self._http_base = str(URL(base_url).with_path("").with_query(""))
 
         self.sid: Optional[str] = None
+        self._pending_sid: Optional[str] = None
+
         self._username: Optional[str] = None
         self._password: Optional[str] = None
 
@@ -79,16 +81,15 @@ class GLinetClient:
         self._auth_base = "/rpc"
 
     # =====================================================
-    # BACKEND DETECTION (STRICT & SAFE)
+    # BACKEND DETECTION (SAFE + NON-DESTRUCTIVE)
     # =====================================================
     async def _detect_backend(self):
         if self._mode:
             return
 
-        gl_ok = False
-        luci_ok = False
+        gl_score = 0
+        luci_score = 0
 
-        # ---------------- GL PROBE ----------------
         try:
             r = await self._raw_post("/rpc", json={
                 "jsonrpc": "2.0",
@@ -98,18 +99,13 @@ class GLinetClient:
             })
 
             result = r.get("result") if isinstance(r, dict) else None
-
-            if (
-                isinstance(result, dict)
-                and isinstance(result.get("salt"), str)
-                and isinstance(result.get("nonce"), str)
-            ):
-                gl_ok = True
+            if isinstance(result, dict):
+                gl_score += int("salt" in result)
+                gl_score += int("nonce" in result)
 
         except Exception:
             pass
 
-        # ---------------- LUCI PROBE (FIXED STRICT CHECK) ----------------
         try:
             r = await self._raw_post("/cgi-bin/luci/rpc/auth", json={
                 "method": "login",
@@ -117,28 +113,18 @@ class GLinetClient:
                 "id": 1,
             })
 
-            # FIX: only accept real structured responses
-            if (
-                isinstance(r, dict)
-                and ("result" in r or "sid" in r or "token" in r)
-                and "html" not in str(r).lower()
-            ):
-                luci_ok = True
+            if isinstance(r, dict) and "error" not in r:
+                luci_score += 1
 
         except Exception:
             pass
 
-        if luci_ok and not gl_ok:
-            self._mode = "luci"
-            self._rpc_base = "/cgi-bin/luci/rpc"
-            self._auth_base = "/cgi-bin/luci/rpc/auth"
-        else:
-            self._mode = "gl"
-            self._rpc_base = "/rpc"
-            self._auth_base = "/rpc"
+        self._mode = "luci" if luci_score > gl_score else "gl"
+        self._rpc_base = "/cgi-bin/luci/rpc" if self._mode == "luci" else "/rpc"
+        self._auth_base = "/cgi-bin/luci/rpc/auth" if self._mode == "luci" else "/rpc"
 
     # =====================================================
-    # HASHING (GL AUTH)
+    # HASHING (GL.iNet CHALLENGE AUTH)
     # =====================================================
     def _hashes(self, username: str, password: str, salt: str, nonce: str):
         a = hashlib.md5((password + salt).encode()).hexdigest()
@@ -150,7 +136,7 @@ class GLinetClient:
         return [h1, h2]
 
     # =====================================================
-    # SID VALIDATION (STRICT)
+    # STRICT SID VALIDATION (FINAL COMMIT ONLY)
     # =====================================================
     async def _validate_sid(self, sid: str) -> bool:
         try:
@@ -161,17 +147,19 @@ class GLinetClient:
                 "params": [sid, "system", "board", {}],
             })
 
-            return (
-                isinstance(r, dict)
-                and r.get("error") is None
-                and r.get("result") is not None
-            )
+            if not isinstance(r, dict):
+                return False
+
+            if r.get("error"):
+                return False
+
+            return r.get("result") is not None
 
         except Exception:
             return False
 
     # =====================================================
-    # LOGIN (SAFE + NON-REENTRANT)
+    # LOGIN (SAFE FLOW + SINGLE COMMIT POINT)
     # =====================================================
     async def login(self, username: str, password: str):
         self._username = username
@@ -181,11 +169,15 @@ class GLinetClient:
             async with self._reauth_lock:
 
                 self.sid = None
+                self._pending_sid = None
+
                 await self._detect_backend()
 
                 last = None
 
                 for _ in range(3):
+
+                    candidate_sid: Optional[str] = None
 
                     # ---------------- LUCI ----------------
                     if self._mode == "luci":
@@ -199,11 +191,7 @@ class GLinetClient:
                                 },
                             )
 
-                            sid = self._extract_sid(last)
-
-                            if sid and await self._validate_sid(sid):
-                                self.sid = sid
-                                return
+                            candidate_sid = self._extract_sid(last)
 
                         except Exception:
                             pass
@@ -218,9 +206,8 @@ class GLinetClient:
                         })
 
                         result = challenge.get("result") if isinstance(challenge, dict) else None
-
                         if not isinstance(result, dict):
-                            break  # prevents wasted retries
+                            continue
 
                         salt = result.get("salt")
                         nonce = result.get("nonce")
@@ -236,14 +223,20 @@ class GLinetClient:
                                 "params": {"username": username, "hash": h},
                             })
 
-                            sid = self._extract_sid(last)
+                            candidate_sid = self._extract_sid(last)
 
-                            if sid and await self._validate_sid(sid):
-                                self.sid = sid
-                                return
+                            if candidate_sid:
+                                break
 
                     except Exception:
                         pass
+
+                    # =================================================
+                    # COMMIT POINT (ONLY VALIDATED SID IS ACCEPTED)
+                    # =================================================
+                    if candidate_sid and await self._validate_sid(candidate_sid):
+                        self.sid = candidate_sid
+                        return
 
                 raise GlinetAuthError(f"Login failed: {last}")
 
@@ -269,20 +262,20 @@ class GLinetClient:
     # =====================================================
     def _is_auth_error(self, err: Any) -> bool:
         if isinstance(err, dict):
-            code = err.get("code")
-            msg = str(err.get("message", "")).lower()
-            return code == -32000 or "access denied" in msg or "session" in msg
+            return (
+                err.get("code") == -32000
+                or "access denied" in str(err).lower()
+                or "session" in str(err).lower()
+            )
 
-        return "access denied" in str(err).lower()
+        return False
 
     # =====================================================
-    # RPC (SAFE REAUTH, SINGLE CYCLE)
+    # RPC
     # =====================================================
     async def _rpc(self, namespace: str, method: str, params=None):
         async with self._rpc_lock:
             await self.ensure_session()
-
-            reauth_done = False
 
             for _ in range(2):
 
@@ -296,27 +289,20 @@ class GLinetClient:
                 data = await self._raw_post(self._rpc_base, json=payload)
 
                 if isinstance(data, dict) and data.get("error"):
-                    err = data["error"]
-
-                    if self._is_auth_error(err):
-                        if reauth_done:
-                            raise GlinetAuthError("Repeated auth failure")
-
-                        reauth_done = True
+                    if self._is_auth_error(data["error"]):
                         async with self._reauth_lock:
                             self.sid = None
                             await self.login(self._username, self._password)
-
                         continue
 
-                    raise GlinetApiError(err)
+                    raise GlinetApiError(data["error"])
 
                 return data.get("result")
 
             raise GlinetAuthError("RPC failed after retry")
 
     # =====================================================
-    # SESSION
+    # SESSION HANDLING
     # =====================================================
     async def ensure_session(self):
         if self.sid:
@@ -330,12 +316,7 @@ class GLinetClient:
         url = str(URL(self._http_base) / path.lstrip("/"))
 
         try:
-            async with self._session.post(
-                url,
-                timeout=self._timeout,
-                **kwargs,
-            ) as resp:
-
+            async with self._session.post(url, timeout=self._timeout, **kwargs) as resp:
                 text = await resp.text()
 
                 if resp.status >= 400:
