@@ -129,7 +129,14 @@ class GLinetClient:
                 self.sid = sid
                 _LOGGER.debug("GL.iNet Flint 2 login successful")
                 return
-
+            
+            _LOGGER.debug(
+                "GL.iNet challenge alg=%s salt_len=%s nonce_present=%s",
+                alg,
+                len(salt),
+                bool(nonce),
+            )
+            
             raise GlinetAuthError(f"Login failed: {sid_resp}")
 
     # =====================================================
@@ -324,14 +331,28 @@ class GLinetClient:
     # =====================================================
     def _cipher_password(self, alg: int, salt: str, password: str) -> str:
         """
-        Flint 2 / gli4py correct:
-        md5(salt + password)
+        GL.iNet compatible password cipher.
+
+        Supports firmware variants:
+        - alg=1 → md5
+        - alg=5 → sha256
+        - alg=6 → sha512
+
+        Most Flint 2 devices use md5, but newer firmware may vary.
         """
 
-        if alg != 1:
-            raise GlinetAuthError("Flint 2 requires md5 (alg=1)")
+        data = (salt + password).encode()
 
-        return hashlib.md5((salt + password).encode()).hexdigest()
+        if alg == 1:
+            return hashlib.md5(data).hexdigest()
+
+        if alg == 5:
+            return hashlib.sha256(data).hexdigest()
+
+        if alg == 6:
+            return hashlib.sha512(data).hexdigest()
+
+        raise GlinetAuthError(f"Unsupported cipher algorithm from router: {alg}")
 
     def _login_hash(self, username: str, cipher: str, nonce: str) -> str:
         """
