@@ -1,8 +1,10 @@
 {
   "config": {
     "error": {
-      "cannot_connect": "Cannot connect to GL.iNet router. Check the host address and ensure the router is online.",
-      "invalid_auth": "Invalid authentication. Check your username and password.",
+      "cannot_connect": "Cannot connect to the GL.iNet router. Check the host address and ensure the router is online.",
+      "invalid_auth": "Invalid username or password.",
+      "invalid_response": "The router returned an unexpected or invalid response.",
+      "host_required": "Please enter a router IP address.",
       "unknown": "An unknown error occurred. Check the logs for details."
     },
     "abort": {
@@ -13,8 +15,15 @@
     },
     "step": {
       "user": {
+        "title": "Select GL.iNet Router",
+        "description": "Choose a discovered router or select 'No device found' to enter details manually.",
+        "data": {
+          "device": "Discovered devices"
+        }
+      },
+      "auth": {
         "title": "Connect to GL.iNet Router",
-        "description": "Enter your GL.iNet router connection details.",
+        "description": "Enter your GL.iNet router credentials.",
         "data": {
           "host": "Host",
           "username": "Username",
@@ -23,10 +32,10 @@
       },
       "zeroconf": {
         "title": "GL.iNet Router Found",
-        "description": "GL.iNet router discovered at {host}. Enter your credentials to continue."
+        "description": "GL.iNet router discovered at {host}."
       },
       "reauth_confirm": {
-        "title": "Reauth GL.iNet Router",
+        "title": "Reauthenticate GL.iNet Router",
         "description": "Your GL.iNet router credentials have expired. Please re-enter them.",
         "data": {
           "host": "Host",
