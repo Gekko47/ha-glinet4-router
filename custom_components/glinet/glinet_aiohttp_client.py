@@ -41,14 +41,13 @@ class GlinetApiError(Exception):
 # =========================================================
 class GLinetClient:
     """
-    Stable, HA-safe GL.iNet client
+    Flint 2–correct GL.iNet RPC client (gli4py-aligned)
 
-    FEATURES:
-    - Challenge → hash → SID authentication
-    - Safe session persistence (SID reuse)
-    - Auto recovery on expired sessions
-    - Race-condition safe re-login lock
-    - Firmware-tolerant error detection
+    AUTH FLOW:
+      1. challenge(username)
+      2. cipher = md5(salt + password)
+      3. login_hash = md5(username:cipher:nonce)
+      4. login → SID
     """
 
     def __init__(
@@ -69,7 +68,6 @@ class GLinetClient:
 
         # Locks
         self._login_lock = asyncio.Lock()
-        self._relogin_lock = asyncio.Lock()
         self._rpc_lock = asyncio.Lock()
 
         self._rpc_id = itertools.count(1)
@@ -83,7 +81,7 @@ class GLinetClient:
         self._close_session = close_session
 
     # =====================================================
-    # LOGIN (CHALLENGE FLOW)
+    # LOGIN
     # =====================================================
     async def login(self, username: str, password: str) -> None:
         self._username = username
@@ -100,9 +98,6 @@ class GLinetClient:
 
             challenge = await self._challenge(username)
 
-            # -----------------------------
-            # Normalize response shape
-            # -----------------------------
             if not isinstance(challenge, dict):
                 raise GlinetAuthError(f"Invalid challenge response: {challenge}")
 
@@ -118,42 +113,27 @@ class GLinetClient:
                 nonce = challenge["nonce"]
             except KeyError as e:
                 raise GlinetAuthError(
-                    f"Missing field in challenge response: {e} | raw={challenge}"
+                    f"Missing challenge field: {e} | raw={challenge}"
                 ) from e
 
-            hash_method = challenge.get("hash-method", "md5")
+            cipher = self._cipher_password(alg, salt, password)
+            login_hash = self._login_hash(username, cipher, nonce)
 
-            cipher1, cipher2 = self._cipher_password(alg, salt, password)
+            sid_resp = await self._get_sid(username, login_hash)
 
-            last_resp = None
+            if not isinstance(sid_resp, dict):
+                raise GlinetAuthError(f"Invalid login response: {sid_resp}")
 
-            for idx, cipher in enumerate((cipher1, cipher2), start=1):
-                try:
-                    login_hash = self._login_hash(hash_method, username, cipher, nonce)
-                    sid_resp = await self._get_sid(username, login_hash)
-                    last_resp = sid_resp
+            sid = sid_resp.get("sid")
+            if sid:
+                self.sid = sid
+                _LOGGER.debug("GL.iNet Flint 2 login successful")
+                return
 
-                    if not isinstance(sid_resp, dict):
-                        _LOGGER.debug("Login attempt %d returned non-dict: %s", idx, sid_resp)
-                        continue
-
-                    if sid_resp.get("error"):
-                        _LOGGER.debug("Login attempt %d error: %s", idx, sid_resp["error"])
-                        continue
-
-                    sid = sid_resp.get("sid")
-                    if sid:
-                        self.sid = sid
-                        _LOGGER.debug("GL.iNet login successful (variant %d)", idx)
-                        return
-
-                except Exception as e:
-                    _LOGGER.debug("Login attempt %d failed: %s", idx, e)
-
-            raise GlinetAuthError(f"Login failed (both variants): {last_resp}")
+            raise GlinetAuthError(f"Login failed: {sid_resp}")
 
     # =====================================================
-    # SESSION RECOVERY ENTRYPOINT
+    # SESSION
     # =====================================================
     async def ensure_session(self):
         if self.sid:
@@ -190,14 +170,9 @@ class GLinetClient:
         })
 
     # =====================================================
-    # RPC CORE (AUTO HEAL + SAFE RETRY)
+    # RPC CORE
     # =====================================================
-    async def _rpc(
-        self,
-        namespace: str,
-        method: str,
-        params: dict | None = None,
-    ):
+    async def _rpc(self, namespace: str, method: str, params: dict | None = None):
         async with self._rpc_lock:
             await self.ensure_session()
 
@@ -210,17 +185,12 @@ class GLinetClient:
 
             data = await self._raw_post("/rpc", json=payload)
 
-            # =================================================
-            # AUTH FAILURE DETECTION
-            # =================================================
             if isinstance(data, dict) and data.get("error"):
                 err = data["error"]
-                code = err.get("code") if isinstance(err, dict) else None
                 msg = str(err).lower()
 
                 auth_failed = (
-                    code in (-32000, -32001, -32602)
-                    or "access denied" in msg
+                    "access denied" in msg
                     or "not logged in" in msg
                     or "session" in msg
                 )
@@ -228,26 +198,14 @@ class GLinetClient:
                 if not auth_failed:
                     raise GlinetApiError(err)
 
-                _LOGGER.debug("SID invalid → attempting single recovery")
+                self.sid = None
+                await self.ensure_session()
 
-                # =================================================
-                # SINGLE RECOVERY (NO RECURSION)
-                # =================================================
-                async with self._login_lock:
-                    # double-check after acquiring lock
-                    self.sid = None
+                payload["params"][0] = self.sid
+                data = await self._raw_post("/rpc", json=payload)
 
-                    try:
-                        await self.ensure_session()
-                    except Exception as e:
-                        raise GlinetAuthError(f"Re-auth failed: {e}") from e
-
-                    # retry request ONCE (no recursion)
-                    payload["params"][0] = self.sid
-                    data = await self._raw_post("/rpc", json=payload)
-
-                    if isinstance(data, dict) and data.get("error"):
-                        raise GlinetApiError(data["error"])
+                if isinstance(data, dict) and data.get("error"):
+                    raise GlinetApiError(data["error"])
 
             return data.get("result")
 
@@ -255,34 +213,29 @@ class GLinetClient:
     # VALIDATION
     # =====================================================
     async def async_validate_session(self) -> bool:
-        """Validate the current SID without triggering a full re-login."""
         if not self.sid:
             return False
 
-        payload = {
+        data = await self._raw_post("/rpc", json={
             "jsonrpc": "2.0",
             "id": next(self._rpc_id),
             "method": "call",
             "params": [self.sid, "system", "status", {}],
-        }
+        })
 
-        data = await self._raw_post("/rpc", json=payload)
+        return isinstance(data, dict) and "result" in data
 
-        if isinstance(data, dict) and data.get("error"):
-            return False
-
-        return "result" in data
-
+    # =====================================================
+    # KEEPALIVE
+    # =====================================================
     async def async_keepalive_session(self) -> bool:
-        """Refresh session to prevent expiration during idle periods."""
         if not self.sid:
             return False
 
         try:
-            # Light-weight keepalive: just validate the session exists
             return await self.async_validate_session()
         except Exception as e:
-            _LOGGER.debug("Session keepalive failed, will attempt re-auth on next request: %s", e)
+            _LOGGER.debug("Keepalive failed: %s", e)
             return False
 
     # =====================================================
@@ -317,8 +270,9 @@ class GLinetClient:
     # =====================================================
     async def _bootstrap(self):
         try:
-            async with self._session.get(self._http_base, timeout=self._timeout):
-                pass
+            async with self._session.get(self._http_base, timeout=self._timeout) as resp:
+                if resp.status >= 400:
+                    raise GlinetConnectionError(f"Bootstrap failed HTTP {resp.status}")
         except Exception as e:
             raise GlinetConnectionError(f"Bootstrap failed: {e}") from e
 
@@ -353,7 +307,10 @@ class GLinetClient:
                 try:
                     return await resp.json(content_type=None)
                 except Exception:
-                    return json.loads(text)
+                    try:
+                        return json.loads(text or "{}")
+                    except Exception:
+                        raise GlinetHTTPError(f"Invalid JSON: {text[:200]}")
 
         except ClientConnectorError as e:
             raise GlinetConnectionError(str(e)) from e
@@ -363,35 +320,26 @@ class GLinetClient:
             raise GlinetTimeoutError("Timeout")
 
     # =====================================================
-    # CRYPTO
+    # CRYPTO (GLI4PY CORRECT FOR FLINT 2)
     # =====================================================
-    def _cipher_password(self, alg: int, salt: str, password: str) -> tuple[str, str]:
-        def hash_fn(data: bytes) -> str:
-            if alg == 1:
-                return hashlib.md5(data).hexdigest()
-            if alg == 5:
-                return hashlib.sha256(data).hexdigest()
-            if alg == 6:
-                return hashlib.sha512(data).hexdigest()
-            raise ValueError(f"Unsupported cipher algorithm: {alg}")
+    def _cipher_password(self, alg: int, salt: str, password: str) -> str:
+        """
+        Flint 2 / gli4py correct:
+        md5(salt + password)
+        """
 
-        # Firmware inconsistency handling
-        attempt1 = hash_fn((salt + password).encode())
-        attempt2 = hash_fn((password + salt).encode())
+        if alg != 1:
+            raise GlinetAuthError("Flint 2 requires md5 (alg=1)")
 
-        return attempt1, attempt2
+        return hashlib.md5((salt + password).encode()).hexdigest()
 
-    def _login_hash(self, method: str, username: str, cipher: str, nonce: str) -> str:
-        data = f"{username}:{cipher}:{nonce}".encode()
+    def _login_hash(self, username: str, cipher: str, nonce: str) -> str:
+        """
+        gli4py-compatible:
+        md5(username:cipher:nonce)
+        """
 
-        if method == "md5":
-            return hashlib.md5(data).hexdigest()
-        if method == "sha256":
-            return hashlib.sha256(data).hexdigest()
-        if method == "sha512":
-            return hashlib.sha512(data).hexdigest()
-
-        raise ValueError("Unsupported hash method")
+        return hashlib.md5(f"{username}:{cipher}:{nonce}".encode()).hexdigest()
 
     # =====================================================
     # UTIL
