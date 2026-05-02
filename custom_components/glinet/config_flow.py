@@ -1,4 +1,4 @@
-"""GL.iNet Config Flow (HA 2026.4 - Device picker + Auto-skip + Explicit UX + Full Error Mapping)."""
+"""GL.iNet Config Flow (HA 2026.4 - Production Hardened)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from typing import Any
 
 import voluptuous as vol
 
-from aiohttp import ClientConnectorError, ClientResponseError, ClientError
+from aiohttp import (
+    ClientConnectorError,
+    ClientResponseError,
+    ClientError,
+)
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
@@ -17,7 +21,11 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, API_PATH
-from .glinet_aiohttp_client import GLinetClient
+from .glinet_aiohttp_client import (
+    GLinetClient,
+    GlinetAuthError,
+    GlinetConnectionError,
+)
 from .options_flow import GlinetOptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,6 +44,10 @@ DEFAULT_HOST = "192.168.8.1"
 # =========================================================
 def normalize_host(host: str) -> str:
     return (host or "").strip().replace("http://", "").replace("https://", "").lower()
+
+
+def normalize_username(username: str) -> str:
+    return (username or "").strip()
 
 
 def build_auth_schema(default_host: str | None = None):
@@ -74,9 +86,22 @@ class HostRequired(HomeAssistantError):
 # =========================================================
 async def validate_input(hass: HomeAssistant, data: dict) -> dict:
     host = normalize_host(data.get(CONF_HOST, ""))
+    username = normalize_username(data.get(CONF_USERNAME))
+    password = data.get(CONF_PASSWORD) or ""
 
     if not host:
         raise HostRequired
+
+    if not username or not password:
+        raise InvalidAuth
+
+    _LOGGER.debug(
+        "GL.iNet login attempt host=%s username='%s' len=%d password_len=%d",
+        host,
+        username,
+        len(username),
+        len(password),
+    )
 
     api = GLinetClient(
         session=async_get_clientsession(hass),
@@ -84,22 +109,45 @@ async def validate_input(hass: HomeAssistant, data: dict) -> dict:
     )
 
     try:
-        await api.login(data[CONF_USERNAME], data[CONF_PASSWORD])
+        # ---- AUTH ----
+        await api.login(username, password)
+
+        # ---- VERIFY API ----
         info = await api.async_get_system_info()
 
+    # -----------------------------
+    # AUTH FAILURES
+    # -----------------------------
+    except GlinetAuthError as e:
+        _LOGGER.debug("Auth failed for %s: %s", host, e)
+        raise InvalidAuth from e
+
+    # -----------------------------
+    # HTTP RESPONSE (must come early)
+    # -----------------------------
     except ClientResponseError as e:
         if e.status in (401, 403):
             raise InvalidAuth from e
+
+        _LOGGER.debug("HTTP error from %s: %s", host, e)
         raise CannotConnect from e
 
-    except (ClientConnectorError, ClientError) as e:
+    # -----------------------------
+    # NETWORK / TRANSPORT
+    # -----------------------------
+    except (GlinetConnectionError, ClientConnectorError, ClientError) as e:
+        _LOGGER.debug("Connection error to %s: %s", host, e)
         raise CannotConnect from e
 
+    # -----------------------------
+    # UNKNOWN / BAD API RESPONSE
+    # -----------------------------
     except Exception:
-        _LOGGER.exception("Unexpected router error")
+        _LOGGER.exception("Unexpected router error during validation")
         raise InvalidResponse
 
     if not isinstance(info, dict):
+        _LOGGER.debug("Invalid system info response: %s", info)
         raise InvalidResponse
 
     mac = (info.get("mac") or "").lower().strip()
@@ -109,6 +157,8 @@ async def validate_input(hass: HomeAssistant, data: dict) -> dict:
         "model": info.get("model") or "GL.iNet",
         "mac": mac,
         "host": host,
+        "username": username,
+        "password": password,
     }
 
 
@@ -124,38 +174,24 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._selected_host: str | None = None
 
     # -----------------------------------------------------
-    # USER STEP (EXPLICIT UX MODEL)
-    # -----------------------------------------------------
     async def async_step_user(self, user_input=None):
         devices = self._devices
 
-        # -------------------------------------------------
-        # NO DEVICES → EXPLICIT STATE (NO SILENT SKIP)
-        # -------------------------------------------------
         if user_input is None and len(devices) == 0:
             self._selected_host = None
 
-            schema = build_auth_schema(DEFAULT_HOST)
-
             return self.async_show_form(
                 step_id="auth",
-                data_schema=schema,
+                data_schema=build_auth_schema(DEFAULT_HOST),
                 description_placeholders={
                     "warning": "No GL.iNet devices were discovered. Using default router address."
                 },
-                errors={},
             )
 
-        # -------------------------------------------------
-        # SINGLE DEVICE → SAFE AUTO-SKIP
-        # -------------------------------------------------
         if user_input is None and len(devices) == 1:
             self._selected_host = devices[0]["host"]
             return await self.async_step_auth()
 
-        # -------------------------------------------------
-        # MULTI DEVICE PICKER
-        # -------------------------------------------------
         options = [
             {
                 "label": f"{d.get('model') or 'GL.iNet'} ({d['host']})",
@@ -164,12 +200,7 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             for d in devices
         ]
 
-        options.append(
-            {
-                "label": "Manual setup (enter host manually)",
-                "value": "manual",
-            }
-        )
+        options.append({"label": "Manual setup", "value": "manual"})
 
         schema = vol.Schema(
             {
@@ -193,48 +224,8 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=schema)
 
     # -----------------------------------------------------
-    # ZEROCONF
-    # -----------------------------------------------------
-    async def async_step_zeroconf(self, discovery_info: dict[str, Any]):
-        host = discovery_info.get("ip_address") or discovery_info.get("host")
-
-        if not host:
-            return self.async_abort(reason="no_devices_found")
-
-        host = normalize_host(str(host))
-
-        model = "GL.iNet"
-
-        try:
-            api = GLinetClient(
-                session=async_get_clientsession(self.hass),
-                base_url=f"http://{host}{API_PATH}",
-            )
-            info = await api.async_get_system_info()
-            model = info.get("model") or model
-        except Exception:
-            model = model
-
-        if not any(d["host"] == host for d in self._devices):
-            self._devices.append(
-                {
-                    "host": host,
-                    "model": model or "GL.iNet",
-                }
-            )
-
-        await self.async_set_unique_id(host)
-        self._abort_if_unique_id_configured()
-
-        return await self.async_step_user()
-
-    # -----------------------------------------------------
-    # AUTH STEP
-    # -----------------------------------------------------
     async def async_step_auth(self, user_input=None):
         errors: dict[str, str] = {}
-
-        schema = build_auth_schema(self._selected_host)
 
         if user_input is not None:
             try:
@@ -269,13 +260,13 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=info["title"],
                     data={
                         CONF_HOST: info["host"],
-                        CONF_USERNAME: user_input[CONF_USERNAME],
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
+                        CONF_USERNAME: info["username"],
+                        CONF_PASSWORD: info["password"],
                     },
                 )
 
         return self.async_show_form(
             step_id="auth",
-            data_schema=schema,
+            data_schema=build_auth_schema(self._selected_host),
             errors=errors,
         )
