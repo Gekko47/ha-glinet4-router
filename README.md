@@ -1,8 +1,8 @@
 # GL.iNet Router Integration for Home Assistant
 
-A modern Home Assistant integration for monitoring and controlling **GL.iNet routers** using a hardened async API client and coordinator-based architecture.
+A modern Home Assistant integration for monitoring and controlling **GL.iNet routers** using a hardened async API client, dual-coordinator architecture, and automatic session persistence.
 
-Designed for **Home Assistant 2026.4+** with HACS compatibility in mind.
+Designed for **Home Assistant 2026.1+** with full HACS compatibility and production-ready resilience.
 
 ---
 
@@ -14,8 +14,8 @@ Real-time system and network metrics:
 
 - Router uptime
 - WAN download/upload throughput
-- CPU temperature
-- Memory usage
+- CPU temperature and thermal metrics
+- Memory usage (absolute and percentage)
 - Disk usage
 - Flash usage
 - System load (1m / 5m / 15m averages)
@@ -25,15 +25,15 @@ Real-time system and network metrics:
 - Port forwarding rules
 - USB device detection
 - Firmware version
-- System logs (basic support)
+- System logs
 
 ---
 
 ### 👥 Connected Devices
 
-Automatically discovered client devices:
+Automatically discovered client devices with dynamic tracking:
 
-- MAC-based device tracking
+- MAC-based device identity
 - Device registry integration
 - Per-device attributes:
   - IP address
@@ -41,12 +41,15 @@ Automatically discovered client devices:
   - Interface (WiFi/Ethernet)
   - Signal strength (if available)
   - RX/TX usage (if provided by router)
+  - Connection status
+- Devices appear/disappear dynamically
 
 ---
 
 ### 📶 WiFi Control
 
-- One switch per WiFi interface
+Individual switches per WiFi interface:
+
 - Enable / disable WiFi radios
 - Attributes:
   - SSID
@@ -64,71 +67,91 @@ Automatically discovered client devices:
 - VPN enable/disable switch
 - Attributes:
   - Connection type
-  - Server
-  - Status
-  - Uptime
+  - Server address
+  - Connection status
+  - Uptime tracking
 
 ---
 
 ### 🔘 Router Controls
 
-- Reboot router button
+- Reboot router button with error handling
 - Service-based control layer (safe entry_id targeting)
 
 ---
 
 ## 🧠 Architecture
 
-This integration uses a **dual-coordinator model**:
+This integration uses a **dual-coordinator model** optimized for reliability:
 
-### ⚡ Fast Coordinator
+### ⚡ Fast Coordinator (30s default)
 Handles frequent updates:
-- Clients
-- WiFi state
-- VPN status
-- Throughput
-- WAN status
+- Connected clients
+- WiFi state & radio status
+- VPN connection status
+- Network throughput
+- WAN IP and status
 
-### 🐢 Slow Coordinator
+### 🐢 Slow Coordinator (300s default)
 Handles heavy or rarely changing data:
-- System info
-- Firmware version
+- System info & firmware
 - Device metadata
-- Static network configuration
+- USB device inventory
+- DHCP lease configuration
+- Port forwarding rules
 
-This separation improves:
-- Performance
-- API load reduction
-- State stability in HA
-
----
-
-## 🔄 Dynamic Updates
-
-- Entities update automatically via coordinators
-- Client devices appear/disappear dynamically
-- No polling per entity (fully centralized polling model)
+### Configurable Intervals
+All update intervals are **user-configurable** from the integration options:
+- Fast coordinator: 10–300 seconds
+- Slow coordinator: 30–3600 seconds
+- API timeout: 5–60 seconds
 
 ---
 
-## 🧩 Device Registry
+## 🔐 Authentication & Session Management
 
-The integration creates:
+### Challenge-Based Authentication
+- GL.iNet challenge-response protocol with MD5/SHA256/SHA512 support
+- Secure credential handling (never sent in plaintext)
+- Automatic SID (session ID) management
 
-### Router Device
-- Single GL.iNet router entry in Home Assistant
+### Session Persistence
+- SID stored securely in Home Assistant storage
+- Automatic session recovery on HA restart
+- SID validation on restore
+- Single-attempt re-login on session expiration
 
-### Client Devices
-- Each MAC address becomes a Home Assistant device
-- No entities required per client (lightweight registry model)
+### Session Keepalive
+- Proactive session refresh during idle periods
+- Prevents SID expiration on long-running HA instances
+- Automatic re-authentication on first use after expiration
 
 ---
 
-## 🔍 Discovery
+## 📊 Diagnostics & Debugging
 
-### Supported discovery methods:
-- Zeroconf (`_glinet._tcp.local`)
-- Manual configuration
+### Built-In Diagnostics
+Generate diagnostic reports from **Settings → Devices & Services → GL.iNet Router**:
+
+- API connection state
+- Coordinator health (update success rate, last update time)
+- System info snapshot
+- Data availability per coordinator
+- Safely redacted credentials
+
+Useful for troubleshooting connection issues without exposing sensitive data.
+
+---
+
+## 🔄 Dynamic Configuration
+
+### Options Flow (Post-Setup Customization)
+Reconfigure without re-adding integration:
+
+- Adjust fast coordinator update interval
+- Adjust slow coordinator update interval
+- Adjust API request timeout
+- Changes take effect immediately
 
 ---
 
@@ -154,23 +177,42 @@ The integration creates:
 
 ---
 
+### Reconfiguration
+
+1. Go to **Settings → Devices & Services**
+2. Select **GL.iNet Router**
+3. Click the **three dots → Options**
+4. Adjust update intervals and timeouts
+
+---
+
 ## 🔧 Services
 
 ### `glinet.reboot_router`
 
-Reboot a router instance.
+Safely reboot a router instance with error handling.
 
 **Parameters:**
-- `entry_id` (required): Config entry ID
+- `entry_id` (required): Config entry ID of the router
+
+**Example:**
+```yaml
+service: glinet.reboot_router
+data:
+  entry_id: "a1b2c3d4e5f6g7h8"
+```
 
 ---
 
 ## 🔐 Security
 
-- Credentials stored securely in Home Assistant config entries
-- No plaintext credential storage
-- API token handling is session-based and automatically refreshed
+- Credentials stored securely in Home Assistant config entries storage
+- No plaintext credential storage or logging
+- Session IDs (SIDs) managed with automatic validation
+- Challenge-response protocol (no password over network)
 - Sensitive attributes redacted in diagnostics
+- Safe re-authentication on session expiration
+- Race-condition proof locking for concurrent API calls
 
 ---
 
@@ -178,8 +220,8 @@ Reboot a router instance.
 
 - GL.iNet router with compatible firmware (GL.iNet OS 4+ recommended)
 - Local network access to router
-- Home Assistant **2026.4+**
-- Python aiohttp session (provided by HA)
+- Home Assistant **2026.1+**
+- aiohttp (provided by Home Assistant)
 
 ---
 
@@ -192,37 +234,53 @@ Reboot a router instance.
   - DHCP leases
   - Port forwarding rules
 - VPN state detection depends on firmware response format
+- Session IDs may expire after extended network interruptions (auto-recovery enabled)
 
 ---
 
 ## 🧰 Troubleshooting
 
 ### Router not connecting
-- Verify host is reachable from HA
-- Check username/password (default often `root`)
-- Ensure router API is enabled
+- Verify host is reachable from HA: `ping <host>`
+- Check username/password (default often `root` with empty password)
+- Ensure GL.iNet API is enabled on the router
+- Check **Settings → Devices & Services → GL.iNet Router → Diagnostics** for detailed error state
 
-### Missing sensors
+### Authentication failures after HA restart
+- Session ID recovery is attempted automatically
+- If recovery fails, full re-authentication occurs transparently
+- Check logs for persistent auth errors
+
+### Missing sensors or devices
 - Firmware may not expose all endpoints
-- Check HA logs for API failures
+- Check **Settings → Devices & Services → GL.iNet Router → Diagnostics** to see coordinator data availability
+- View HA logs for API endpoint failures
 
 ### Discovery not working
-- Ensure multicast/zeroconf is not blocked
-- Try manual configuration
+- Ensure multicast/zeroconf is not blocked between HA and router
+- Check network VLAN isolation
+- Use manual configuration as fallback
 
-Logs:
-Settings → System → Logs → GL.iNet Router
+### Slow responsiveness
+- Increase fast/slow coordinator intervals from Options
+- Reduce API timeout if network is reliable
+- Check HA system load (coordinators respect HA's update cycle)
+
+### View Logs
+**Settings → System → Logs → Filter by `glinet`**
+
 ---
 
 ## 🧠 Design Philosophy
 
 This integration prioritizes:
 
-- Stability over feature explosion
-- Centralized state management (coordinators)
-- Minimal entity overhead
-- Safe API retry logic
-- HA-native patterns only
+- **Stability**: Hardened error handling, race-condition safe concurrency
+- **Reliability**: Session persistence, automatic recovery, keepalive mechanisms
+- **Performance**: Centralized coordinator model, no entity-level polling
+- **Maintainability**: HA-native patterns, clean architecture, comprehensive logging
+- **User Control**: Configurable intervals and timeouts
+- **Debugging**: Built-in diagnostics, detailed logging
 
 ---
 
@@ -231,10 +289,12 @@ This integration prioritizes:
 Pull requests welcome.
 
 Please ensure:
-- HA 2026.4 compatibility
+- HA 2026.1+ compatibility
 - No entity-side polling
-- All API access goes through coordinator layer
+- All API access through coordinator layer
+- Coordinator-based architecture maintained
 - HACS lint compliance
+- Comprehensive error handling
 
 ---
 

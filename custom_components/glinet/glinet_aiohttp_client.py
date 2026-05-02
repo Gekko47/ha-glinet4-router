@@ -258,6 +258,18 @@ class GLinetClient:
 
         return "result" in data
 
+    async def async_keepalive_session(self) -> bool:
+        """Refresh session to prevent expiration during idle periods."""
+        if not self.sid:
+            return False
+
+        try:
+            # Light-weight keepalive: just validate the session exists
+            return await self.async_validate_session()
+        except Exception as e:
+            _LOGGER.debug("Session keepalive failed, will attempt re-auth on next request: %s", e)
+            return False
+
     # =====================================================
     # API HELPERS
     # =====================================================
@@ -281,6 +293,9 @@ class GLinetClient:
 
     async def async_get_vpn(self):
         return await self._rpc("vpn", "status")
+
+    async def async_reboot(self):
+        return await self._rpc("system", "reboot")
 
     # =====================================================
     # BOOTSTRAP

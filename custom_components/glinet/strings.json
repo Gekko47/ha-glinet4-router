@@ -1,9 +1,15 @@
 {
   "config": {
     "error": {
-      "cannot_connect": "Cannot connect to GL.iNet router. Check the host address.",
+      "cannot_connect": "Cannot connect to GL.iNet router. Check the host address and ensure the router is online.",
       "invalid_auth": "Invalid authentication. Check your username and password.",
       "unknown": "An unknown error occurred. Check the logs for details."
+    },
+    "abort": {
+      "already_configured": "This GL.iNet router is already configured.",
+      "no_devices_found": "No GL.iNet routers found on the network.",
+      "no_entry": "Configuration entry not found.",
+      "reauth_successful": "GL.iNet router credentials updated successfully."
     },
     "step": {
       "user": {
@@ -14,13 +20,51 @@
           "username": "Username",
           "password": "Password"
         }
-      }
-    },
-    "entity": {
-      "sensor": {
-        "system_logs": {
-          "name": "System Logs"
+      },
+      "zeroconf": {
+        "title": "GL.iNet Router Found",
+        "description": "GL.iNet router discovered at {host}. Enter your credentials to continue."
+      },
+      "reauth_confirm": {
+        "title": "Reauth GL.iNet Router",
+        "description": "Your GL.iNet router credentials have expired. Please re-enter them.",
+        "data": {
+          "host": "Host",
+          "username": "Username",
+          "password": "Password"
         }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "GL.iNet Integration Options",
+        "description": "Configure update intervals and timeouts.",
+        "data": {
+          "fast_interval": "Fast coordinator update interval (seconds)",
+          "slow_interval": "Slow coordinator update interval (seconds)",
+          "timeout": "API request timeout (seconds)"
+        }
+      }
+    }
+  },
+  "services": {
+    "reboot_router": {
+      "name": "Reboot router",
+      "description": "Reboot the GL.iNet router.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Configuration entry ID of the router to reboot."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "system_logs": {
+        "name": "System Logs"
       }
     }
   }

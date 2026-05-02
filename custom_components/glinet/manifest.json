@@ -1,7 +1,8 @@
 {
   "domain": "glinet",
   "name": "GL.iNet Router",
-  "version": "0.3.5",
+  "version": "0.3.6",
+  "homeassistant": "2026.1",
   "documentation": "https://github.com/Gekko47/ha-glinet4-router",
   "issue_tracker": "https://github.com/Gekko47/ha-glinet4-router/issues",
   "codeowners": ["@Gekko47"],

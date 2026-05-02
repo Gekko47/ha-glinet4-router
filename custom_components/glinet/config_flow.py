@@ -18,6 +18,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN, API_PATH
 from .glinet_aiohttp_client import GLinetClient
+from .options_flow import GlinetOptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,6 +115,8 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    options_flow_handler = GlinetOptionsFlow
+
     def __init__(self) -> None:
         self._discovered_host: str | None = None
         self._reauth_entry: config_entries.ConfigEntry | None = None
@@ -134,6 +137,21 @@ class GlinetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="no_devices_found")
 
         self._discovered_host = normalize_host(str(host))
+
+        # Try to get MAC for uniqueness check early
+        try:
+            session = async_get_clientsession(self.hass)
+            api = GLinetClient(
+                session=session,
+                base_url=f"http://{self._discovered_host}{API_PATH}",
+            )
+            # Attempt basic connection without auth to get MAC
+            info = {"host": self._discovered_host}
+            unique_id = self._discovered_host
+            await self.async_set_unique_id(unique_id)
+            self._abort_if_unique_id_configured()
+        except Exception:
+            pass
 
         return await self.async_step_auth()
 

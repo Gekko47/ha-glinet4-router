@@ -30,6 +30,14 @@ class GlinetSlowCoordinator(DataUpdateCoordinator):
         data: dict[str, Any] = {}
 
         # -------------------------
+        # SESSION KEEPALIVE
+        # -------------------------
+        try:
+            await self.api.async_keepalive_session()
+        except Exception as e:
+            _LOGGER.debug("Session keepalive check failed: %s", e)
+
+        # -------------------------
         # STATUS
         # -------------------------
         try:

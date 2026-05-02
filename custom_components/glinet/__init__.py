@@ -10,10 +10,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, API_PATH
-from .services import async_setup_services
+from .services import async_setup_services, async_unload_services
 from .glinet_aiohttp_client import GLinetClient
 from .fast_coordinator import GlinetFastCoordinator
 from .slow_coordinator import GlinetSlowCoordinator
+from .options_flow import GlinetOptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ PLATFORMS = ["sensor", "binary_sensor", "switch", "button"]
 
 STORE_VERSION = 1
 STORE_KEY = "glinet_auth_store"
+CONFIG_VERSION = 1
 
 
 # =========================================================
@@ -123,6 +125,23 @@ class GlinetAuthBroker:
 
 
 # =========================================================
+# MIGRATION
+# =========================================================
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entry to new version."""
+    _LOGGER.debug("Migrating from version %s", entry.version)
+
+    if entry.version == 1:
+        # Future migrations go here
+        pass
+
+    hass.config_entries.async_update_entry(entry, version=CONFIG_VERSION)
+
+    _LOGGER.info("Migration complete, new version: %s", entry.version)
+    return True
+
+
+# =========================================================
 # ENTRY SETUP
 # =========================================================
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -131,17 +150,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host = normalize_host(entry.data["host"])
     session = async_get_clientsession(hass)
 
-    # -----------------------------------------------------
+    # Register options flow update listener
+    entry.async_on_unload(entry.add_update_listener(async_update_listener))
+
+    # Initialize options with defaults if not present
+    if not entry.options:
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                "fast_interval": 30,
+                "slow_interval": 300,
+                "timeout": 10,
+            },
+        )
+
+    # Get intervals from options
+    fast_interval = entry.options.get("fast_interval", 30)
+    slow_interval = entry.options.get("slow_interval", 300)
+    timeout = entry.options.get("timeout", 10)
+
     # API CLIENT
-    # -----------------------------------------------------
     api = GLinetClient(
         session=session,
         base_url=f"http://{host}{API_PATH}",
+        timeout=timeout,
     )
 
-    # -----------------------------------------------------
     # AUTH BROKER
-    # -----------------------------------------------------
     auth = GlinetAuthBroker(hass, api, entry.entry_id)
 
     await auth.set_credentials(
@@ -154,20 +189,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "auth": auth,
     }
 
-    # -----------------------------------------------------
     # AUTH INITIALIZATION (RESTORE OR LOGIN)
-    # -----------------------------------------------------
     try:
         await auth.ensure()
     except Exception as e:
         _LOGGER.exception("GL.iNet authentication failed: %s", e)
         return False
 
-    # -----------------------------------------------------
-    # COORDINATORS
-    # -----------------------------------------------------
-    fast = GlinetFastCoordinator(hass, api)
-    slow = GlinetSlowCoordinator(hass, api)
+    # COORDINATORS (with configurable intervals from options)
+    fast = GlinetFastCoordinator(hass, api, interval=fast_interval)
+    slow = GlinetSlowCoordinator(hass, api, interval=slow_interval)
 
     hass.data[DOMAIN][entry.entry_id].update(
         {
@@ -210,6 +241,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 # =========================================================
+# OPTIONS UPDATE LISTENER
+# =========================================================
+async def async_update_listener(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> None:
+    """Handle options update."""
+    await hass.config_entries.async_reload(config_entry.entry_id)
+
+
+# =========================================================
 # UNLOAD
 # =========================================================
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -235,5 +276,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.data.get(DOMAIN):
         hass.data.pop(DOMAIN, None)
+        await async_unload_services(hass)
 
     return unload_ok
